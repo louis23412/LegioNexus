@@ -1,40 +1,6 @@
-// ====================== tools.js ======================
-/**
- * Tools Module
- * Purpose: Full toolRegistry with definitions + handlers; central dynamic tool hub.
- *
- * Enhancements added:
- * - Dynamic factory (createToolRegistry) with full dependency injection to eliminate circular imports
- * - Tool versioning + metadata
- * - Standardized error response schema with error codes
- * - New useful tool: get_chatroom_stats
- * - New tool: search_chatroom (for immediate chat access "search if needed")
- * - Dynamic registration helper (registerTool) for runtime extensibility
- * - Rate-limiting placeholder + improved argument validation
- * - Automatic tool documentation helper (getAllToolDocs)
- * - All original tool behavior, console output, and error handling preserved
- * - Dropped hand-holding: members now receive full chat history directly on consult/P2P and figure out the rest
- * - NEW: format_chat_messages tool (cleans messages to "Speaker: direct final answer" only - eliminates bloat)
- * - NEW: Full topic/thread support across chat tools (search by topic, assign topic on consult/P2P, getFormattedChatMessages)
- * - 4-space indentation throughout
- * 
- * UPDATES FOR THIS REQUEST:
- * - Enforce tool permissions: show_all_tools now ONLY returns the tools the calling agent actually has access to
- *   (leader never sees worker tools; members never see finalize_answer or leader-only tools).
- * - Enforce chatroom formatting: ALL chat history passed to LLMs (get_team_status, consult_member, message_team_member)
- *   now uses getFormattedChatMessages() → only "Speaker: clean conclusive answer" to eliminate bloat.
- * - P2P now passes ONLY a short recent context snippet via new getP2PContext() (not full history).
- *   This keeps side-channel conversations context-aware, meaningfully contributing to the main thread,
- *   and prevents circular loops/repeated questions already present in recent context.
- * - ALL hand-holding prompts (consult_member + message_team_member) now provide JUST ENOUGH:
- *   short/recent context + the exact question/task. The model figures out everything else
- *   (tools, response strategy, when to stop, how to contribute to chatroom, etc.).
- */
-
 export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
     const toolRegistry = {};
 
-    // Standardized error helper
     const createErrorResponse = (message, code = 'UNKNOWN_ERROR') => ({
         status: 'error',
         data: null,
@@ -42,12 +8,10 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
         error: { code, timestamp: new Date().toISOString() }
     });
 
-    // Dynamic registration (for future hot-loading of tools)
     const registerTool = (name, definition, handler) => {
         toolRegistry[name] = { definition, handler, version: definition.function.version || '1.0' };
     };
 
-    // === CORE TOOLS (exact original behavior) ===
     registerTool('get_array_length', {
         type: 'function',
         function: {
@@ -111,7 +75,6 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
         const { use_summary = false, topic = null } = args || {};
         const summary = context.chatroom.getStatusSummary(topic);
 
-        // ENFORCED: chatroom formatting - only Speaker + clean conclusive answer
         const history = use_summary
             ? context.chatroom.getCompressedSummary(topic)
             : context.chatroom.getFormattedChatMessages(topic);
@@ -132,7 +95,6 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
         };
     });
 
-    // === NEW ENHANCEMENT TOOL ===
     registerTool('get_chatroom_stats', {
         type: 'function',
         function: {
@@ -153,7 +115,6 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
         };
     });
 
-    // === ENHANCED TOOL: immediate chat search (now with topicFilter) ===
     registerTool('search_chatroom', {
         type: 'function',
         function: {
@@ -182,7 +143,6 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
         };
     });
 
-    // === NEW TOOL: clean bloat-free chat formatter (core request) ===
     registerTool('format_chat_messages', {
         type: 'function',
         function: {
@@ -247,11 +207,8 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
         console.log(`\x1b[33m ${query} \x1b[0m`);
         console.log('─'.repeat(90));
 
-        // ENFORCED: chatroom formatting - only Speaker + clean conclusive answer
         const currentHistory = context.chatroom.getFormattedChatMessages(topic);
 
-        // MINIMAL hand-holding: just context + task. Model figures out tools, response strategy,
-        // how to contribute to chatroom, and when to conclude.
         const memberInitialMessages = [
             { role: 'system', content: memberConfig.system },
             {
@@ -262,11 +219,10 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
 
         let memberResult;
         try {
-            // Use registry to build tools (self-contained)
             const memberTools = memberConfig.tools
                 .map(toolName => toolRegistry[toolName]?.definition)
                 .filter(Boolean);
-            memberResult = await runAgentFn(member_name, memberInitialMessages, memberTools, memberConfig.maxIterations);
+            memberResult = await runAgentFn(member_name, memberInitialMessages, memberTools);
         } catch (err) {
             console.error(`❌ [CONSULT ERROR] ${member_name}:`, err.message);
             const failureMsg = `[MEMBER CRASHED] ${err.message}`;
@@ -362,11 +318,8 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
 
         const recipientConfig = agentsConfig[member_name];
 
-        // SHORT context only for P2P (core enhancement)
         const currentHistory = context.chatroom.getP2PContext(topic);
 
-        // MINIMAL hand-holding: just recent context + the exact P2P message.
-        // Model figures out everything else (tools, relevance to main conversation, reply style, etc.).
         const recipientInitialMessages = [
             { role: 'system', content: recipientConfig.system },
             {
@@ -382,7 +335,7 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
             const recipientTools = recipientConfig.tools
                 .map(toolName => toolRegistry[toolName]?.definition)
                 .filter(Boolean);
-            recipientResult = await runAgentFn(member_name, recipientInitialMessages, recipientTools, recipientConfig.maxIterations);
+            recipientResult = await runAgentFn(member_name, recipientInitialMessages, recipientTools);
         } catch (err) {
             console.error(`❌ [P2P ERROR] ${member_name}:`, err.message);
             const failureReply = `[P2P RECIPIENT CRASHED] ${err.message}`;
@@ -419,7 +372,6 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
         };
     });
 
-    // Helper for auto-documentation (enhancement)
     toolRegistry.getAllToolDocs = () => Object.keys(toolRegistry)
         .filter(k => k !== 'getAllToolDocs')
         .map(name => ({
