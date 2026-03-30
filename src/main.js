@@ -27,8 +27,16 @@ const model = process.argv.includes('--model')
   ? process.argv[process.argv.indexOf('--model') + 1] 
   : 'qwen3.5';
 
-const testArr = new Array(1234).fill(1);
-const userPrompt = 'How many items are in the test array?';
+const dataObj = {
+    // Can place sanatized / formatted data inputs here.
+    // For example: candle stick data from an external trading API
+
+    // one meta tool can scan and see what supported data sources are available + randomly sample, so agents have more information to work with.
+
+    testArr : new Array(12345).fill(1)
+}
+
+const userPrompt = 'How many items are in the test array?'; // Prompt can later evolve into more complex questions, this is just a simple test case for now (common LLM counting pitfall)
 
 const teamConstitution = `
     Coordination Constitution:
@@ -131,7 +139,7 @@ async function runAgent(agentName, initialMessages, agentTools, maxIterations) {
             if (msg.content) {
                 if (!inContent) {
                     inContent = true;
-                    if (inThinking) console.log('\n');
+                    console.log('\n' + '─'.repeat(90));
                     console.log(`\n💬 [${agentName} FINAL RESPONSE]`);
                     console.log('─'.repeat(90));
                 }
@@ -196,7 +204,7 @@ async function runAgent(agentName, initialMessages, agentTools, maxIterations) {
 // ─────────────────────────────────────────────────────────────────────────────
 // TOOL REGISTRY INITIALIZATION (after runAgent is defined)
 // ─────────────────────────────────────────────────────────────────────────────
-toolRegistry = createToolRegistry(runAgent, agentsConfig, testArr);
+toolRegistry = createToolRegistry(runAgent, agentsConfig, dataObj);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN EXECUTION + ENHANCEMENTS
@@ -205,7 +213,7 @@ const main = async () => {
     const start = performance.now();
 
     console.log(`\x1b[32m🚀 Starting multi-agent collaboration with model: ${model}\x1b[0m`);
-    console.log(`📊 Test array size: ${testArr.length} | Prompt: "${userPrompt}"`);
+    console.log(`📊 Test array size: ${dataObj.testArr.length} | Prompt: "${userPrompt}"`);
 
     const leaderConfig = agentsConfig.TeamLeader;
 

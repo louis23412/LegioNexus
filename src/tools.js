@@ -31,7 +31,7 @@
  *   (tools, response strategy, when to stop, how to contribute to chatroom, etc.).
  */
 
-export const createToolRegistry = (runAgentFn, agentsConfig, testArr) => {
+export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
     const toolRegistry = {};
 
     // Standardized error helper
@@ -59,8 +59,8 @@ export const createToolRegistry = (runAgentFn, agentsConfig, testArr) => {
     }, async (args, context = {}) => {
         return {
             status: 'success',
-            data: { count: testArr.length },
-            message: `Array length retrieved successfully: ${testArr.length} items.`
+            data: { count: dataObj.testArr.length },
+            message: `Array length retrieved successfully: ${dataObj.testArr.length} items.`
         };
     });
 
