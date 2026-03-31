@@ -102,6 +102,10 @@ async function runAgent(agentName, initialMessages, agentTools) {
         if (assistantMessage.tool_calls?.length > 0) {
             for (const toolCall of assistantMessage.tool_calls) {
                 const functionName = toolCall.function.name;
+
+                console.log(`\n🔧 [${agentName} USE TOOL (${functionName})]`);
+                console.log('─'.repeat(90));
+
                 const args = parseToolArguments(toolCall.function.arguments);
 
                 if (functionName === 'finalize_answer') {
@@ -149,12 +153,12 @@ const main = async (userPrompt, dataObj) => {
 
     const start = performance.now();
 
-    console.log('\n💡 [USER QUESTION:]');
+    console.log('\n💡 [USER QUESTION]');
     console.log('─'.repeat(90));
     console.log(`\x1b[35m${userPrompt}\x1b[0m`);
     console.log('─'.repeat(90));
 
-    const leaderConfig = agentsConfig.TeamLeader;
+    const leaderConfig = agentsConfig['team-leader'];
 
     const leaderMessages = [
         { role: 'system', content: leaderConfig.system },
