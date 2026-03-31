@@ -28,6 +28,24 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
         };
     });
 
+    registerTool('sample_array_items', {
+        type: 'function',
+        function: {
+            name: 'sample_array_items',
+            description: 'Randomly returns one item in the test array, use this to see what data types the array contains',
+            parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+            version: '1.1'
+        }
+    }, async (args, context = {}) => {
+        const randomItem = dataObj.testArr[Math.floor(Math.random() * dataObj.testArr.length)];
+
+        return {
+            status: 'success',
+            data: { sample: randomItem },
+            message: `Random sample collected successfully`
+        };
+    });
+
     registerTool('show_all_tools', {
         type: 'function',
         function: {
@@ -64,25 +82,33 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
                 type: 'object',
                 properties: {
                     use_summary: { type: 'boolean', description: 'true to get a compressed summary instead of full history (recommended when >20 messages)' },
+                    your_name: {type: 'string', description: 'your assigned name'},
                     topic: { type: 'string', description: 'Optional: filter status and history to a specific topic/thread' }
                 },
-                required: [],
+                required: ['your_name'],
                 additionalProperties: false
             },
             version: '1.3'
         }
     }, async (args, context = {}) => {
-        const { use_summary = false, topic = null } = args || {};
+        const { use_summary = false, your_name = null, topic = null } = args || {};
         const summary = context.chatroom.getStatusSummary(topic);
 
         const history = use_summary
             ? context.chatroom.getCompressedSummary(topic)
             : context.chatroom.getFormattedChatMessages(topic);
 
+        const team_members = Object.keys(agentsConfig)
+        team_members.forEach((v, i) => {
+            if (v === your_name) {
+                team_members[i] = `${v}(you)`
+            }
+        })
+
         return {
             status: 'success',
             data: {
-                team_members: Object.keys(agentsConfig),
+                team_members,
                 consulted_members: summary.consultedMembers,
                 total_messages: summary.totalMessages,
                 history: history,
@@ -181,7 +207,7 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
             parameters: {
                 type: 'object',
                 properties: {
-                    member_name: { type: 'string', description: 'Exact name from get_team_status (e.g. DataAnalyst, CodeExpert, FactVerifier)' },
+                    member_name: { type: 'string', description: 'Exact name from get_team_status' },
                     query: { type: 'string', description: 'Specific instruction or question for the member' },
                     topic: { type: 'string', description: 'Optional: topic/thread to assign this consultation to (for easier later search)' }
                 },
@@ -200,6 +226,10 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
         const memberConfig = agentsConfig[member_name];
         if (!memberConfig) {
             return createErrorResponse(`Unknown member: ${member_name}. Use get_team_status to see available members.`, 'UNKNOWN_MEMBER');
+        }
+
+        if (context.agentName === member_name) {
+            return createErrorResponse(`You can not consult yourself (${context.agentName})`, 'SELF_REFF');
         }
 
         console.log(`\n🔍 [CONSULT ${context.agentName || 'TeamLeader'} → ${member_name}]`);

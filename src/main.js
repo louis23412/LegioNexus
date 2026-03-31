@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import ollama from 'ollama';
 import { Chatroom } from './chat.js';
 import { createToolRegistry } from './tools.js';
@@ -176,6 +178,14 @@ const main = async (userPrompt, dataObj) => {
             leaderTools
         );
 
+        const chatLog = chatroom.dump();
+        const chatId = start.toString(36);
+        const chatLogPath = path.join('chat_logs');
+        const finalFilePath = path.join(chatLogPath, `${chatId}.json`);
+
+        if (!fs.existsSync(chatLogPath)) fs.mkdirSync(chatLogPath, { recursive: true });
+        fs.writeFileSync(finalFilePath, JSON.stringify(chatLog));
+
         console.log('\n🏆 [FINAL TEAM ANSWER]');
         console.log('─'.repeat(90));
 
@@ -187,7 +197,8 @@ const main = async (userPrompt, dataObj) => {
         console.log(`\x1b[32m${leaderResult.content}\x1b[0m`);
 
         const duration = ((performance.now() - start) / 1000).toFixed(2);
-        console.log(`\n⏱️ Total time: ${duration}s | 💬 Chatroom final size: ${chatroom.log.length} messages`);
+        console.log(`\n⏳ Total time: ${duration}s | 💬 Chatroom final size: ${chatroom.log.length} messages`);
+        console.log(`📝 Chat log: ${finalFilePath}`);
         console.log('─'.repeat(90) + '\n');
     } catch (err) {
         console.error(err);

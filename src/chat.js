@@ -103,11 +103,6 @@ export class Chatroom {
         return compressed;
     }
 
-    clear() {
-        this.log = [];
-        this.reactions = {};
-    }
-
     getStatusSummary(topic = null) {
         const filtered = topic ? this.getMessagesByTopic(topic) : this.log;
         const consulted = [...new Set(filtered.map(e => e.speaker))];
@@ -118,5 +113,14 @@ export class Chatroom {
             reactionsCount: Object.keys(this.reactions).length,
             topic: topic || 'all'
         };
+    }
+
+    clear() {
+        this.log = [];
+        this.reactions = {};
+    }
+
+    dump() {
+        return this.log;
     }
 }
