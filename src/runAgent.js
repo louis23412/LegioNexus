@@ -151,7 +151,7 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
 }
 
 export const startConversation = async (userPrompt) => {
-    toolRegistry = createToolRegistry(runAgent, agentsConfig, dataObj);
+    toolRegistry = await createToolRegistry(runAgent, agentsConfig, dataObj);
 
     const totalLeaders = Object.entries(agentsConfig).filter(agent => agent[1].isLeader);
 
@@ -172,6 +172,11 @@ export const startConversation = async (userPrompt) => {
         .filter(Boolean);
 
     try {
+        console.log('\n💡 [USER QUESTION]');
+        console.log('─'.repeat(90));
+        console.log(`\x1b[35m${userPrompt}\x1b[0m`);
+        console.log('─'.repeat(90));
+        
         const leaderResult = await runAgent(
             leaderConfig.name,
             leaderMessages,

@@ -1,13 +1,10 @@
-import { userPrompt } from './inputs/inputs.js';
+import fs from 'fs';
+import path from 'path';
+
 import { startConversation } from './runAgent.js';
 
-const main = async () => {
+const main = async (userPrompt) => {
     const start = performance.now();
-
-    console.log('\n💡 [USER QUESTION]');
-    console.log('─'.repeat(90));
-    console.log(`\x1b[35m${userPrompt}\x1b[0m`);
-    console.log('─'.repeat(90));
 
     const finalResponse = await startConversation(userPrompt);
 
@@ -24,6 +21,15 @@ const main = async () => {
     const duration = ((performance.now() - start) / 1000).toFixed(2);
     console.log(`\n⏳ Total time: ${duration}s`);
     console.log('─'.repeat(90) + '\n');
+
+    const conversationId = start.toString(36);
+    const logDir = path.join(import.meta.dirname, '..', 'chat_logs');
+    const filePath = path.join(logDir, `${conversationId}.json`);
+
+    if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
+    fs.writeFileSync(filePath, JSON.stringify(finalResponse));
 };
 
-main().catch(console.error);
+
+const userPrompt = 'How many items are in the test array?';
+main(userPrompt).catch(console.error);
