@@ -1,7 +1,7 @@
 import ollama from 'ollama';
 
-import { dataObj } from './inputs/inputs.js';
 import { Chatroom } from './chat/chat.js';
+import { inputStore } from './inputs/inputs.js';
 import { createToolRegistry } from './tools/tools.js';
 import { createAgentsConfig } from './agents/agents.js';
 
@@ -93,7 +93,7 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
             }
 
             if (msg.tool_calls?.length > 0) {
-                assistantMessage.tool_calls = msg.tool_calls;
+                assistantMessage.tool_calls.push(...msg.tool_calls);
             }
         }
 
@@ -151,11 +151,11 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
 }
 
 export const startConversation = async (userPrompt) => {
-    toolRegistry = await createToolRegistry(runAgent, agentsConfig, dataObj);
+    toolRegistry = await createToolRegistry(runAgent, agentsConfig, inputStore);
 
     const totalLeaders = Object.entries(agentsConfig).filter(agent => agent[1].isLeader);
 
-    if (totalLeaders.length > 1 ) {
+    if (totalLeaders.length !== 1 ) {
         console.log(`Only one agent can be set as team leader. Total current leaders: ${totalLeaders.length}`)
         process.exit();
     }

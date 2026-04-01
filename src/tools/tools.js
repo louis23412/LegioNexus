@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 
-export const createToolRegistry = async (runAgentFn, agentsConfig, dataObj) => {
+export const createToolRegistry = async (runAgentFn, agentsConfig, inputStore) => {
     const toolRegistry = {};
 
     const createErrorResponse = (message, code = 'UNKNOWN_ERROR') => ({
@@ -61,7 +61,7 @@ export const createToolRegistry = async (runAgentFn, agentsConfig, dataObj) => {
         const handler = tool.createHandler({
             runAgentFn,
             agentsConfig,
-            dataObj,
+            inputStore,
             toolRegistry,
             createErrorResponse
         });

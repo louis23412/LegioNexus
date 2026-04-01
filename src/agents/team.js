@@ -7,6 +7,16 @@ const toolBelts = {
 
     worker_only_tools : [
         'message_team_member',
+        
+        'list_data_structures',
+        'get_structure_info',
+
+        'get_array_length',
+        'sample_array_items',
+
+        'get_object_property',
+        'check_set_contains',
+        'get_map_value'
     ],
 
     all_access_tools : [
@@ -17,11 +27,6 @@ const toolBelts = {
         'get_chatroom_stats',
         'search_chatroom',
         'format_chat_messages'
-    ],
-
-    test_tools : [
-        'get_array_length',
-        'sample_array_items'
     ]
 }
 
@@ -62,8 +67,7 @@ export const memberDefinitions = [
 
         toolAccess : [
             toolBelts.worker_only_tools,
-            toolBelts.all_access_tools,
-            toolBelts.test_tools
+            toolBelts.all_access_tools
         ],
 
         maxThinkChain : 100,
@@ -87,8 +91,7 @@ export const memberDefinitions = [
 
         toolAccess : [
             toolBelts.worker_only_tools,
-            toolBelts.all_access_tools,
-            toolBelts.test_tools
+            toolBelts.all_access_tools
         ],
 
         maxThinkChain : 100,
@@ -112,8 +115,7 @@ export const memberDefinitions = [
 
         toolAccess : [
             toolBelts.worker_only_tools,
-            toolBelts.all_access_tools,
-            toolBelts.test_tools
+            toolBelts.all_access_tools
         ],
 
         maxThinkChain : 100,
