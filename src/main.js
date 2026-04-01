@@ -11,13 +11,14 @@ const chatroom = new Chatroom(200);
 
 let toolRegistry;
 
-function getToolHandler(toolName, registry) {
+const getToolHandler = (toolName, registry) => {
     return registry[toolName]?.handler || null;
 }
 
-function parseToolArguments(rawArgs) {
+const parseToolArguments = (rawArgs) => {
     let args = {};
     if (rawArgs == null) return args;
+
     if (typeof rawArgs === 'string') {
         const trimmed = rawArgs.trim();
         if (trimmed && trimmed !== 'null') {
@@ -26,10 +27,11 @@ function parseToolArguments(rawArgs) {
     } else if (typeof rawArgs === 'object') {
         args = rawArgs;
     }
+
     return args;
 }
 
-async function withRetry(fn, retries = 2) {
+const withRetry = async (fn, retries = 2) => {
     for (let i = 0; i <= retries; i++) {
         try {
             return await fn();
@@ -41,7 +43,7 @@ async function withRetry(fn, retries = 2) {
     }
 }
 
-async function runAgent(agentName, initialMessages, agentTools) {
+const runAgent = async (agentName, initialMessages, agentTools) => {
     let messages = [...initialMessages];
     let iteration = 0;
 

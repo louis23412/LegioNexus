@@ -128,7 +128,7 @@ const cleanToolList = (list) => {
     return (list.flat()).sort((a, b) => a.localeCompare(b));
 }
 
-export function createAgentsConfig() {
+export const createAgentsConfig = () => {
     const memberObj = {};
 
     for (const member of memberDefinitions) {
@@ -146,10 +146,10 @@ export function createAgentsConfig() {
     return memberObj;
 }
 
-export function getAgentNames(config) {
+export const getAgentNames = (config) => {
     return Object.keys(config);
 }
 
-export function validateAgent(config, agentName) {
-    return !!config[agentName];
+export const validateAgent = (config, agentName) => {
+    return config[agentName];
 }
