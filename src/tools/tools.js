@@ -412,5 +412,3 @@ export const createToolRegistry = (runAgentFn, agentsConfig, dataObj) => {
 
     return toolRegistry;
 };
-
-export const getToolDefinition = (name, registry) => registry[name]?.definition || null;

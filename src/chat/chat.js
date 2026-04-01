@@ -119,8 +119,4 @@ export class Chatroom {
         this.log = [];
         this.reactions = {};
     }
-
-    dump() {
-        return this.log;
-    }
 }

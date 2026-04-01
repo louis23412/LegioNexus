@@ -25,9 +25,11 @@ const toolBelts = {
     ]
 }
 
-const memberDefinitions = [
+export const memberDefinitions = [
     {
         name : 'team-leader',
+        isLeader : true,
+
         toolAccess : [
             toolBelts.leader_only_tools,
             toolBelts.all_access_tools
@@ -56,6 +58,8 @@ const memberDefinitions = [
 
     {
         name : 'data-analyst',
+        isLeader : false,
+
         toolAccess : [
             toolBelts.worker_only_tools,
             toolBelts.all_access_tools,
@@ -79,6 +83,8 @@ const memberDefinitions = [
 
     {
         name : 'code-expert',
+        isLeader : false,
+
         toolAccess : [
             toolBelts.worker_only_tools,
             toolBelts.all_access_tools,
@@ -102,6 +108,8 @@ const memberDefinitions = [
 
     {
         name : 'fact-verifier',
+        isLeader : false,
+
         toolAccess : [
             toolBelts.worker_only_tools,
             toolBelts.all_access_tools,
@@ -123,33 +131,3 @@ const memberDefinitions = [
         `
     }
 ];
-
-const cleanToolList = (list) => {
-    return (list.flat()).sort((a, b) => a.localeCompare(b));
-}
-
-export const createAgentsConfig = () => {
-    const memberObj = {};
-
-    for (const member of memberDefinitions) {
-        memberObj[member.name] = {
-            name : member.name,
-            tools : cleanToolList(member.toolAccess),
-
-            maxIterations : member.maxThinkChain,
-            model : member.model,
-            options : member.options,
-            system : member.personalityGuideline.trim()
-        }
-    }
-
-    return memberObj;
-}
-
-export const getAgentNames = (config) => {
-    return Object.keys(config);
-}
-
-export const validateAgent = (config, agentName) => {
-    return config[agentName];
-}
