@@ -6,6 +6,8 @@ import { createToolRegistry } from './tools/tools.js';
 import { createAgentsConfig } from './agents/agents.js';
 
 let toolRegistry;
+const teamThoughtChains = {};
+
 const chatroom = new Chatroom(200);
 const agentsConfig = createAgentsConfig();
 
@@ -39,6 +41,18 @@ const withRetry = async (fn, retries = 2) => {
             await new Promise(r => setTimeout(r, 500 * (i + 1)));
         }
     }
+}
+
+const captureThoughtChain = (messages, agentName) => {
+    const agentExist = teamThoughtChains[agentName];
+    if (!agentExist) teamThoughtChains[agentName] = [];
+
+    const chainId = teamThoughtChains[agentName].length;
+
+    teamThoughtChains[agentName].push({
+        chainId,
+        thoughts : messages
+    })
 }
 
 const runAgent = async (agentName, initialMessages, agentTools) => {
@@ -111,6 +125,8 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
                 const args = parseToolArguments(toolCall.function.arguments);
 
                 if (functionName === 'finalize_answer') {
+                    captureThoughtChain(messages, agentName);
+
                     return {
                         content: args.final_answer || '[No answer provided]',
                         explanation: args.consensus_explanation || '',
@@ -153,7 +169,7 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
             })
 
             messages.push({
-                role : 'context-summary',
+                role : 'user',
                 content : contextSummarization.message.content
             });
 
@@ -161,6 +177,8 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
         }
 
         if (assistantMessage.content?.trim()) {
+            captureThoughtChain(messages, agentName);
+
             return {
                 content: assistantMessage.content.trim(),
                 messages
@@ -169,6 +187,8 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
 
         break;
     }
+
+    captureThoughtChain(messages, agentName);
 
     return {
         content: `[${agentName}] Max iterations reached without final answer.`,
@@ -209,7 +229,7 @@ export const startConversation = async (userPrompt) => {
             leaderTools
         );
 
-        return leaderResult;
+        return { leaderResult, teamThoughtChains };
     } catch (err) {
         console.error(err);
         process.exit(1);

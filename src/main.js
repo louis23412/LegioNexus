@@ -11,23 +11,23 @@ const main = async (userPrompt) => {
     console.log('\n🏆 [FINAL TEAM ANSWER]');
     console.log('─'.repeat(90));
 
-    if (finalResponse.explanation) {
-        console.log(`📋 Consensus explanation:\n\x1b[33m${finalResponse.explanation}\x1b[0m\n`);
+    if (finalResponse.leaderResult.explanation) {
+        console.log(`📋 Consensus explanation:\n\x1b[33m${finalResponse.leaderResult.explanation}\x1b[0m\n`);
     }
 
     console.log('🤖 Final answer:')
-    console.log(`\x1b[32m${finalResponse.content}\x1b[0m`);
+    console.log(`\x1b[32m${finalResponse.leaderResult.content}\x1b[0m`);
 
-    const duration = ((performance.now() - start) / 1000).toFixed(2);
-    console.log(`\n⏳ Total time: ${duration}s`);
-    console.log('─'.repeat(90) + '\n');
-
-    const conversationId = start.toString(36);
+    const conversationId = (Math.random() * start).toString(36);
     const logDir = path.join(import.meta.dirname, '..', 'chat_logs');
     const filePath = path.join(logDir, `${conversationId}.json`);
 
     if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
-    fs.writeFileSync(filePath, JSON.stringify(finalResponse));
+    fs.writeFileSync(filePath, JSON.stringify(finalResponse.teamThoughtChains));
+
+    const duration = ((performance.now() - start) / 1000).toFixed(2);
+    console.log(`\n⏳ Total time: ${duration}s | Full team thoughts: ${conversationId}.json`);
+    console.log('─'.repeat(90) + '\n');
 };
 
 
