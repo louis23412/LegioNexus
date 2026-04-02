@@ -131,6 +131,32 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
                     console.warn(`⚠️  No handler for tool: ${functionName} (agent: ${agentName})`);
                 }
             }
+
+            console.log(`\n📝 [${agentName} SUMMARIZE CONTEXT]`);
+            console.log('─'.repeat(90));
+
+            const contextSummarization = await ollama.chat({
+                model : agentsConfig[`${agentName}`].model,
+                messages : [
+                    { role : 'system', content: 'provide a clean quick summary that captures all current information completely.' },
+                    { 
+                        role : 'user', 
+                        content : `
+                            You are ${agentName}.
+                            Compress the following messages into a quick summary that acts as a mental note for your next step: 
+                            ${JSON.stringify(messages)}
+                        ` 
+                    }
+                ],
+                keep_alive : 0,
+                think: false
+            })
+
+            messages.push({
+                role : 'context-summary',
+                content : contextSummarization.message.content
+            });
+
             continue;
         }
 
