@@ -33,7 +33,13 @@ const toolBelts = {
 
         'get_chatroom_stats',
         'search_chatroom',
-        'format_chat_messages'
+        'format_chat_messages',
+
+        'get_current_datetime'
+    ],
+
+    code_tools : [
+        'test_code_snippet'
     ]
 }
 
@@ -101,7 +107,8 @@ export const memberDefinitions = [
         toolAccess : [
             toolBelts.worker_only_tools,
             toolBelts.all_access_tools,
-            toolBelts.notes_tools
+            toolBelts.notes_tools,
+            toolBelts.code_tools
         ],
 
         maxThinkChain : 100,
