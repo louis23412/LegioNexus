@@ -19,6 +19,13 @@ const toolBelts = {
         'get_map_value'
     ],
 
+    notes_tools : [
+        'create_note',
+        'delete_note',
+        'list_my_notes',
+        'get_my_note'
+    ],
+
     all_access_tools : [
         'get_team_status',
 
@@ -37,7 +44,8 @@ export const memberDefinitions = [
 
         toolAccess : [
             toolBelts.leader_only_tools,
-            toolBelts.all_access_tools
+            toolBelts.all_access_tools,
+            toolBelts.notes_tools
         ],
 
         maxThinkChain : 150,
@@ -67,7 +75,8 @@ export const memberDefinitions = [
 
         toolAccess : [
             toolBelts.worker_only_tools,
-            toolBelts.all_access_tools
+            toolBelts.all_access_tools,
+            toolBelts.notes_tools
         ],
 
         maxThinkChain : 100,
@@ -91,7 +100,8 @@ export const memberDefinitions = [
 
         toolAccess : [
             toolBelts.worker_only_tools,
-            toolBelts.all_access_tools
+            toolBelts.all_access_tools,
+            toolBelts.notes_tools
         ],
 
         maxThinkChain : 100,
@@ -115,7 +125,8 @@ export const memberDefinitions = [
 
         toolAccess : [
             toolBelts.worker_only_tools,
-            toolBelts.all_access_tools
+            toolBelts.all_access_tools,
+            toolBelts.notes_tools
         ],
 
         maxThinkChain : 100,

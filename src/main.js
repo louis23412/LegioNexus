@@ -26,7 +26,7 @@ const main = async (userPrompt) => {
     fs.writeFileSync(filePath, JSON.stringify(finalResponse.teamThoughtChains));
 
     const duration = ((performance.now() - start) / 1000).toFixed(2);
-    console.log(`\n⏳ Total time: ${duration}s | Full team thoughts: ${conversationId}.json`);
+    console.log(`\n⏳ Total time: ${duration}s | 💾 Full team thoughts: /chat_logs/${conversationId}.json`);
     console.log('─'.repeat(90) + '\n');
 };
 

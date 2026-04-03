@@ -3,12 +3,12 @@ import { EventEmitter } from 'node:events';
 export class InputStore extends EventEmitter {
     constructor() {
         super();
-        this.structures = new Map(); // name → {type, value, metadata}
+        this.structures = new Map();
+        this.notes = new Map();
         this._initializeDefaultData();
     }
 
     _initializeDefaultData() {
-        // ── Handful of data structures agents can work with ──
         this.register('testArray', new Array(12345).fill('test item'), {
             description: 'Large test array for length and sampling demonstrations',
             category: 'demo'
@@ -39,6 +39,51 @@ export class InputStore extends EventEmitter {
             description: 'Test Map with primitive and object values',
             category: 'demo'
         });
+    }
+
+    createNote(agentName, title, body) {
+        if (!agentName) throw new Error('agentName is required');
+        if (!this.notes.has(agentName)) {
+            this.notes.set(agentName, []);
+        }
+        const notesList = this.notes.get(agentName);
+        const id = `note_${Date.now()}_${Math.floor(Math.random() * 99999)}`;
+
+        const note = {
+            id,
+            title: String(title || 'Untitled Note').trim(),
+            body: String(body || '').trim(),
+            createdAt: new Date().toISOString()
+        };
+
+        notesList.push(note);
+        this.emit('note_created', { agentName, noteId: id, title: note.title });
+        return note;
+    }
+
+    deleteNote(agentName, noteId) {
+        if (!agentName || !this.notes.has(agentName)) return false;
+
+        const notesList = this.notes.get(agentName);
+        const index = notesList.findIndex(n => n.id === noteId);
+        if (index === -1) return false;
+
+        const deleted = notesList[index];
+        notesList.splice(index, 1);
+        this.emit('note_deleted', { agentName, noteId, title: deleted.title });
+
+        if (notesList.length === 0) this.notes.delete(agentName);
+        return true;
+    }
+
+    getMyNotes(agentName) {
+        if (!agentName) return [];
+        return this.notes.get(agentName) || [];
+    }
+
+    getNote(agentName, noteId) {
+        const notesList = this.getMyNotes(agentName);
+        return notesList.find(n => n.id === noteId) || null;
     }
 
     _detectType(value) {
@@ -125,9 +170,13 @@ export class InputStore extends EventEmitter {
                 metadata: entry.metadata
             };
         }
+
+        obj._notes = {};
+        for (const [agent, notesList] of this.notes) {
+            obj._notes[agent] = notesList;
+        }
         return obj;
     }
 }
 
-// Singleton instance used everywhere
 export const inputStore = new InputStore();
