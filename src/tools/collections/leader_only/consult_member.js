@@ -2,13 +2,12 @@ export const definition = {
     type: 'function',
     function: {
         name: 'consult_member',
-        description: 'Use this tool ONLY to direct and consult a specific team member. Provide a clear query or task. Use get_team_status first to see exact available member names. Now supports topic assignment.',
+        description: 'Use this tool ONLY to direct and consult a specific team member. Provide a clear query or task.',
         parameters: {
             type: 'object',
             properties: {
-                member_name: { type: 'string', description: 'Exact name from get_team_status' },
-                query: { type: 'string', description: 'Specific instruction or question for the member' },
-                topic: { type: 'string', description: 'Optional: topic/thread to assign this consultation to (for easier later search)' }
+                member_name: { type: 'string', description: 'Exact member name' },
+                query: { type: 'string', description: 'Specific instruction or question for the member' }
             },
             required: ['member_name', 'query'],
             additionalProperties: false
@@ -17,9 +16,9 @@ export const definition = {
     }
 };
 
-export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse, toolRegistry }) => {   // ← toolRegistry added
+export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse, toolRegistry }) => {
     return async (args, context = {}) => {
-        const { member_name, query, topic = 'main' } = args || {};
+        const { member_name, query } = args || {};
 
         if (!member_name || !query) {
             return createErrorResponse('Invalid arguments: member_name and query are required.', 'INVALID_ARGS');
@@ -27,7 +26,7 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse, t
 
         const memberConfig = agentsConfig[member_name];
         if (!memberConfig) {
-            return createErrorResponse(`Unknown member: ${member_name}. Use get_team_status to see available members.`, 'UNKNOWN_MEMBER');
+            return createErrorResponse(`Unknown member: ${member_name}.`, 'UNKNOWN_MEMBER');
         }
 
         if (context.agentName === member_name) {
@@ -39,14 +38,9 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse, t
         console.log(`\x1b[33m ${query} \x1b[0m`);
         console.log('─'.repeat(90));
 
-        const currentHistory = context.chatroom.getFormattedChatMessages(topic);
-
         const memberInitialMessages = [
             { role: 'system', content: memberConfig.system },
-            {
-                role: 'user',
-                content: `Current team chat context:\n\n${currentHistory}\n\nTask: ${query}`
-            }
+            { role: 'user', content: `Task from ${context.agentName}:\n${query}`}
         ];
 
         let memberResult;
@@ -57,8 +51,6 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse, t
             memberResult = await runAgentFn(member_name, memberInitialMessages, memberTools);
         } catch (err) {
             console.error(`❌ [CONSULT ERROR] ${member_name}:`, err.message);
-            const failureMsg = `[MEMBER CRASHED] ${err.message}`;
-            context.chatroom.add(member_name, failureMsg, { topic });
             return createErrorResponse(`Member ${member_name} crashed during consultation: ${err.message}`, 'MEMBER_CRASH');
         }
 
@@ -70,15 +62,12 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse, t
             console.log(`⚠️ [CONSULT] ${member_name} failed or reached max iterations`);
         }
 
-        context.chatroom.add(member_name, memberResponseContent, { topic });
-
         return {
             status: isFailure ? 'member_failed' : 'success',
             data: {
                 consulted_member: member_name,
                 query_received: query,
-                member_response: memberResponseContent,
-                topic: topic
+                member_response: memberResponseContent
             },
             message: isFailure ? 'Member consultation completed with failure signal' : 'consulted successfully'
         };

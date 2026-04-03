@@ -23,7 +23,10 @@ const main = async (userPrompt) => {
     const filePath = path.join(logDir, `${conversationId}.json`);
 
     if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
-    fs.writeFileSync(filePath, JSON.stringify(finalResponse.teamThoughtChains));
+    fs.writeFileSync(filePath, JSON.stringify({
+        thought_chains : finalResponse.teamThoughtChains,
+        team_chat : finalResponse.chatHistory
+    }));
 
     const duration = ((performance.now() - start) / 1000).toFixed(2);
     console.log(`\n⏳ Total time: ${duration}s | 💾 Full team thoughts: /chat_logs/${conversationId}.json`);

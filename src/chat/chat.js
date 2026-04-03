@@ -1,122 +1,150 @@
 export class Chatroom {
-    constructor(sizeLimit = 200) {
-        this.log = [];
-        this.reactions = {};
+    constructor(sizeLimit) {
+        this.messages = [];
+        this.reactions = new Map();
+        this.threads = new Map();
+        this.topics = new Set(['general']);
         this.sizeLimit = sizeLimit;
+        this.currentTopic = 'general';
         this.onPersist = null;
     }
 
-    add(speaker, content, metadata = {}) {
-        const entry = {
-            id: `msg_${Date.now()}_${Math.floor(Math.random() * 9999)}`,
+    sendMessage(speaker, content, options = {}) {
+        const message = {
+            id: `msg_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
             timestamp: new Date().toISOString(),
-            speaker,
-            content: String(content),
-            ...metadata,
-            topic: metadata.topic ?? 'main'
+            speaker: String(speaker).trim(),
+            content: String(content).trim(),
+            topic: options.topic || this.currentTopic,
+            replyTo: options.replyTo || null,
+            type: options.type || 'text',
+            metadata: options.metadata || {},
+            edited: false,
+            deleted: false
         };
-        this.log.push(entry);
 
-        if (this.log.length > this.sizeLimit) {
-            this.log = this.log.slice(-this.sizeLimit);
+        this.messages.push(message);
+        if (this.messages.length > this.sizeLimit) {
+            this.messages.shift();
+        }
+
+        if (message.replyTo) {
+            if (!this.threads.has(message.replyTo)) this.threads.set(message.replyTo, []);
+            this.threads.get(message.replyTo).push(message.id);
+        }
+
+        if (options.topic && !this.topics.has(options.topic)) {
+            this.topics.add(options.topic);
         }
 
         if (this.onPersist) this.onPersist(this.getStatusSummary());
-        return this;
+        return message;
+    }
+
+    deleteMessage(messageId, deleter) {
+        const index = this.messages.findIndex(m => m.id === messageId);
+        if (index === -1) return { success: false, reason: 'Message not found' };
+
+        const msg = this.messages[index];
+        if (deleter !== 'team-leader' && msg.speaker !== deleter) {
+            return { success: false, reason: 'Permission denied' };
+        }
+
+        this.messages.splice(index, 1);
+        this.reactions.delete(messageId);
+        if (this.threads.has(messageId)) this.threads.delete(messageId);
+
+        return { success: true, deletedBy: deleter, messageId };
     }
 
     addReaction(messageId, emoji, reactor) {
-        if (!this.reactions[messageId]) this.reactions[messageId] = [];
-        this.reactions[messageId].push({ emoji, reactor, timestamp: new Date().toISOString() });
+        if (!this.reactions.has(messageId)) {
+            this.reactions.set(messageId, {});
+        }
+        const msgReactions = this.reactions.get(messageId);
+        if (!msgReactions[emoji]) msgReactions[emoji] = [];
+        
+        msgReactions[emoji].push({
+            reactor: String(reactor),
+            timestamp: new Date().toISOString()
+        });
         return true;
     }
 
-    searchMessages(keyword, { speakerFilter, topicFilter, limit = 10 } = {}) {
-        if (!keyword) return [];
-        const lower = keyword.toLowerCase();
-        return this.log
-            .filter(e => 
-                (!speakerFilter || e.speaker === speakerFilter) &&
-                (!topicFilter || e.topic === topicFilter) &&
-                (e.content.toLowerCase().includes(lower) || e.speaker.toLowerCase().includes(lower))
-            )
-            .slice(0, limit);
-    }
+    search(options = {}) {
+        const { keyword, speaker, topic, since, until, replyTo, limit = 30 } = options;
+        let results = [...this.messages].filter(m => !m.deleted);
 
-    getMessagesByTopic(topic) {
-        if (!topic) return this.log;
-        return this.log.filter(e => e.topic === topic);
-    }
-
-    getFormattedChatMessages(topic = null, maxMessages = 20) {
-        const msgs = topic ? this.getMessagesByTopic(topic) : this.log;
-        const recentMsgs = msgs.slice(-maxMessages);
-        if (recentMsgs.length === 0) {
-            return '=== CLEAN CHATROOM (no messages) ===';
+        if (keyword) {
+            const lower = keyword.toLowerCase();
+            results = results.filter(m => 
+                m.content.toLowerCase().includes(lower) || 
+                m.speaker.toLowerCase().includes(lower)
+            );
         }
-        return recentMsgs
-            .map(e => `${e.speaker}: ${e.content.trim()}`)
-            .join('\n\n');
+        if (speaker) results = results.filter(m => m.speaker.toLowerCase() === speaker.toLowerCase());
+        if (topic) results = results.filter(m => m.topic === topic);
+        if (since) {
+            const sinceDate = new Date(since);
+            results = results.filter(m => new Date(m.timestamp) >= sinceDate);
+        }
+        if (until) {
+            const untilDate = new Date(until);
+            results = results.filter(m => new Date(m.timestamp) <= untilDate);
+        }
+        if (replyTo) results = results.filter(m => m.replyTo === replyTo);
+
+        return results.slice(-limit).reverse();
     }
 
-    getP2PContext(topic = null, maxMessages = 5) {
-        const msgs = topic ? this.getMessagesByTopic(topic) : this.log;
-        const recentMsgs = msgs.slice(-maxMessages);
-        if (recentMsgs.length === 0) {
-            return 'No prior context.';
-        }
-        return recentMsgs
-            .map(e => `${e.speaker}: ${e.content.trim()}`)
-            .join('\n\n');
-    }
+    getChatView(topic = null, limit = 40) {
+        let msgs = topic ? this.messages.filter(m => m.topic === topic && !m.deleted) : this.messages.filter(m => !m.deleted);
+        msgs = msgs.slice(-limit);
 
-    getHistory(topic = null) {
-        const filtered = topic ? this.getMessagesByTopic(topic) : this.log;
-        if (filtered.length === 0) {
-            return `=== TEAM CHATROOM HISTORY${topic ? ` (TOPIC: ${topic})` : ''} ===\n(No messages yet)\n=== END OF HISTORY ===\n\n`;
-        }
+        if (msgs.length === 0) return '=== CHATROOM IS EMPTY - Start chatting! ===';
 
-        const formatted = filtered
-            .map(e => `[${e.speaker}]: ${e.content}`)
-            .join('\n\n');
+        let output = `=== TEAM CHATROOM ${topic ? `(${topic.toUpperCase()})` : '(GENERAL)'} ===\n\n`;
 
-        const header = topic ? `=== TEAM CHATROOM HISTORY (TOPIC: ${topic}) ===` : '=== TEAM CHATROOM HISTORY ===';
-        return `${header}\n${formatted}\n\n=== END OF HISTORY ===\n\n`;
-    }
+        msgs.forEach(msg => {
+            const time = new Date(msg.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+            let line = `[${time}] ${msg.speaker}: ${msg.content}`;
 
-    getCompressedSummary(topic = null) {
-        const filtered = topic ? this.getMessagesByTopic(topic) : this.log;
-        if (filtered.length === 0) {
-            return `=== CHATROOM COMPRESSED SUMMARY${topic ? ` (TOPIC: ${topic})` : ''} ===\n(No messages yet)\n=== END COMPRESSED SUMMARY ===\n\n`;
-        }
+            if (msg.replyTo) line = `  ↳ ${line}`;
+            if (msg.edited) line += ' (edited)';
 
-        const summary = this.getStatusSummary(topic);
+            if (this.reactions.has(msg.id)) {
+                const reacts = this.reactions.get(msg.id);
+                const reactSummary = Object.entries(reacts)
+                    .map(([emoji, users]) => `${emoji}(${users.length})`)
+                    .join(' ');
+                if (reactSummary) line += `  ${reactSummary}`;
+            }
+            output += line + '\n';
+        });
 
-        let compressed = `=== CHATROOM COMPRESSED SUMMARY${topic ? ` (TOPIC: ${topic})` : ''} ===\n`;
-        compressed += `Total messages: ${summary.totalMessages}\n`;
-        compressed += `Consulted members: ${summary.consultedMembers.join(', ')}\n\n`;
-        compressed += `Recent activity:\n`;
-        compressed += summary.recentActivity.join('\n') + '\n\n';
-        compressed += `Note: Call get_team_status(use_summary=false${topic ? `, topic="${topic}"` : ''}) for full detailed history if critical.\n`;
-        compressed += `=== END COMPRESSED SUMMARY ===\n\n`;
-
-        return compressed;
+        output += `\n=== END OF CHAT (${msgs.length} messages shown) ===`;
+        return output;
     }
 
     getStatusSummary(topic = null) {
-        const filtered = topic ? this.getMessagesByTopic(topic) : this.log;
+        const filtered = topic ? this.messages.filter(m => m.topic === topic && !m.deleted) : this.messages.filter(m => !m.deleted);
         const consulted = [...new Set(filtered.map(e => e.speaker))];
         return {
             totalMessages: filtered.length,
+            activeTopics: Array.from(this.topics),
             consultedMembers: consulted,
-            recentActivity: filtered.slice(-3).map(e => `${e.speaker}: ${e.content.substring(0, 80)}...`),
-            reactionsCount: Object.keys(this.reactions).length,
+            reactionsCount: this.reactions.size,
             topic: topic || 'all'
         };
     }
 
     clear() {
-        this.log = [];
-        this.reactions = {};
+        this.messages = [];
+        this.reactions.clear();
+        this.threads.clear();
+    }
+
+    dump() {
+        return this.messages
     }
 }

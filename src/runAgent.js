@@ -13,7 +13,7 @@ const agentsConfig = createAgentsConfig();
 
 const getToolHandler = (toolName, registry) => {
     return registry[toolName]?.handler || null;
-}
+};
 
 const parseToolArguments = (rawArgs) => {
     let args = {};
@@ -29,7 +29,7 @@ const parseToolArguments = (rawArgs) => {
     }
 
     return args;
-}
+};
 
 const withRetry = async (fn, retries = 2) => {
     for (let i = 0; i <= retries; i++) {
@@ -41,7 +41,7 @@ const withRetry = async (fn, retries = 2) => {
             await new Promise(r => setTimeout(r, 500 * (i + 1)));
         }
     }
-}
+};
 
 const captureThoughtChain = (messages, agentName) => {
     const agentExist = teamThoughtChains[agentName];
@@ -52,8 +52,8 @@ const captureThoughtChain = (messages, agentName) => {
     teamThoughtChains[agentName].push({
         chainId,
         thoughts : messages
-    })
-}
+    });
+};
 
 const runAgent = async (agentName, initialMessages, agentTools) => {
     let messages = [...initialMessages];
@@ -64,12 +64,12 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
 
         const result = await withRetry(async () => ollama.chat({
             model : agentsConfig[`${agentName}`].model,
-            options: agentsConfig[`${agentName}`].options,
+            options : agentsConfig[`${agentName}`].options,
             messages,
-            tools: agentTools,
-            keep_alive: 0,
-            think: true,
-            stream: true
+            tools : agentTools,
+            keep_alive : 0,
+            think : true,
+            stream : true
         }));
 
         const assistantMessage = {
@@ -144,7 +144,7 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
                         content: JSON.stringify(toolResult),
                     });
                 } else {
-                    console.warn(`⚠️  No handler for tool: ${functionName} (agent: ${agentName})`);
+                    console.warn(`⚠️ No handler for tool: ${functionName} (agent: ${agentName})`);
                 }
             }
 
@@ -154,9 +154,10 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
             const contextSummarization = await ollama.chat({
                 model : agentsConfig[`${agentName}`].model,
                 messages : [
-                    { role : 'system', content: 'provide a clean quick summary that captures all current information completely.' },
-                    { 
-                        role : 'user', 
+                    { role : 'system', content : 'provide a clean quick summary that captures all current information completely.' },
+
+                    {
+                        role : 'user',
                         content : `
                             You are ${agentName}.
                             Compress the following messages into a quick summary that acts as a mental note for your next step: 
@@ -165,11 +166,11 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
                     }
                 ],
                 keep_alive : 0,
-                think: false
-            })
+                think : false
+            });
 
             messages.push({
-                role : 'user',
+                role : 'tool',
                 content : contextSummarization.message.content
             });
 
@@ -194,15 +195,19 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
         content: `[${agentName}] Max iterations reached without final answer.`,
         messages
     };
-}
+};
 
 export const startConversation = async (userPrompt) => {
     toolRegistry = await createToolRegistry(runAgent, agentsConfig, inputStore);
 
-    const totalLeaders = Object.entries(agentsConfig).filter(agent => agent[1].isLeader);
+    chatroom.sendMessage('User', userPrompt, {
+        topic: 'general',
+        metadata: { type: 'user_query', source: 'human' }
+    });
 
-    if (totalLeaders.length !== 1 ) {
-        console.log(`Only one agent can be set as team leader. Total current leaders: ${totalLeaders.length}`)
+    const totalLeaders = Object.entries(agentsConfig).filter(agent => agent[1].isLeader);
+    if (totalLeaders.length !== 1) {
+        console.log(`Only one agent can be set as team leader. Total current leaders: ${totalLeaders.length}`);
         process.exit();
     }
 
@@ -222,16 +227,18 @@ export const startConversation = async (userPrompt) => {
         console.log('─'.repeat(90));
         console.log(`\x1b[35m${userPrompt}\x1b[0m`);
         console.log('─'.repeat(90));
-        
+
         const leaderResult = await runAgent(
             leaderConfig.name,
             leaderMessages,
             leaderTools
         );
 
-        return { leaderResult, teamThoughtChains };
+        const groupChatHistory = chatroom.dump();
+
+        return { leaderResult, teamThoughtChains, chatHistory : groupChatHistory };
     } catch (err) {
         console.error(err);
         process.exit(1);
     }
-}
+};
