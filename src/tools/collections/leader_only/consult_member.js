@@ -40,7 +40,14 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse, t
 
         const memberInitialMessages = [
             { role: 'system', content: memberConfig.system },
-            { role: 'user', content: `Task from ${context.agentName}:\n${query}`}
+            { role: 'user', content: `Task from ${context.agentName}:\n${query}`},
+            { 
+                role: 'tool', 
+                content: `
+                    You are being adressed by ${context.agentName}. Refer to them by this name. 
+                    Ensure your contributions are recorded by analyzing and sending messages in the team chat.
+                `
+            }
         ];
 
         let memberResult;

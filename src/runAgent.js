@@ -67,7 +67,6 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
             options : agentsConfig[`${agentName}`].options,
             messages,
             tools : agentTools,
-            keep_alive : 0,
             think : true,
             stream : true
         }));
@@ -148,30 +147,45 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
                 }
             }
 
-            console.log(`\n📝 [${agentName} SUMMARIZE CONTEXT]`);
-            console.log('─'.repeat(90));
-
-            const contextSummarization = await ollama.chat({
-                model : agentsConfig[`${agentName}`].model,
-                messages : [
-                    { role : 'system', content : 'provide a clean quick summary that captures all current information completely.' },
-
+            const contextSummarization = await withRetry(async () => ollama.chat({
+                model: agentsConfig[`${agentName}`].model,
+                messages: [
+                    { role: 'system', content: 'provide a clean quick summary that captures all current information completely.' },
                     {
-                        role : 'user',
-                        content : `
+                        role: 'user',
+                        content: `
                             You are ${agentName}.
                             Compress the following messages into a quick summary that acts as a mental note for your next step: 
                             ${JSON.stringify(messages)}
-                        ` 
+                        `
                     }
                 ],
-                keep_alive : 0,
-                think : false
-            });
+                think: false,
+                stream: true
+            }));
+
+            let summaryContent = '';
+            let inSummaryContent = false;
+
+            for await (const chunk of contextSummarization) {
+                const msg = chunk.message || {};
+
+                if (msg.content) {
+                    if (!inSummaryContent) {
+                        inSummaryContent = true;
+                        console.log(`\n📋 [${agentName} CONTEXT SUMMARY]`);
+                        console.log('─'.repeat(90));
+                    }
+                    process.stdout.write('\x1b[90m' + msg.content + '\x1b[0m');
+                    summaryContent += msg.content;
+                }
+            }
+
+            console.log('\n' + '─'.repeat(90));
 
             messages.push({
-                role : 'tool',
-                content : contextSummarization.message.content
+                role: 'tool',
+                content: summaryContent.trim() || '[No summary generated]'
             });
 
             continue;
