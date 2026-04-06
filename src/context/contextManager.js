@@ -65,4 +65,44 @@ export class ContextManager {
             ...recent
         ];
     }
+
+    getFocusedSummaryContext(fullMessages, maxRecentForSummary = 8) {
+        if (fullMessages.length === 0) return [];
+
+        const system = fullMessages[0];
+
+        const anchorMessages = this.anchors.map(a => ({
+            role: 'tool',
+            name: `context_anchor_${a.type}`,
+            content: `ANCHOR [${a.type}] (trust ${a.trustScore}/100) [index ${a.index}]: ${a.summary}`
+        }));
+
+        const memoryAwareness = {
+            role: 'tool',
+            name: 'memory_surface',
+            content: `MEMORY_SURFACE (H-MEM 2026 PROTOCOL):\n` +
+                `You have full indexed read access to the following hierarchical anchors.\n` +
+                `Use index-based routing when referencing.\n` +
+                this.anchors.map((a, i) =>
+                    `[${a.index}] ${a.type.toUpperCase()} (trust ${a.trustScore}/100): ${a.summary.substring(0, 280)}...`
+                ).join('\n') +
+                `\nNever hallucinate missing context. Reference by index or type when needed.`
+        };
+
+        let recentSlice = fullMessages.slice(-maxRecentForSummary);
+
+        if (recentSlice[recentSlice.length - 1]?.role === 'tool' && recentSlice.length < fullMessages.length) {
+            const lastAssistantIdx = fullMessages.length - 2;
+            if (fullMessages[lastAssistantIdx]?.role === 'assistant') {
+                recentSlice = fullMessages.slice(Math.max(0, lastAssistantIdx - 3), fullMessages.length);
+            }
+        }
+
+        return [
+            system,
+            ...anchorMessages,
+            memoryAwareness,
+            ...recentSlice
+        ];
+    }
 }

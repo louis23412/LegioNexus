@@ -47,11 +47,13 @@ const captureThoughtChain = (messages, agentName) => {
     teamThoughtChains[agentName].push({ chainId: teamThoughtChains[agentName].length, thoughts: [...messages] });
 };
 
-const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
-    const ctxManager = new ContextManager(agentName);
+const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxManager) => {
+    const summaryContext = ctxManager.getFocusedSummaryContext(messages);
 
-    console.log(`\n📋 [${agentName} MULTI-LAYER CONTEXT ANCHOR BUILD (CODE PROTOCOL)]`);
+    console.log(`\n🧐 [${agentName} MULTI-LAYER SANITY CHECK]`);
     console.log('─'.repeat(110));
+
+    console.log(`\x1b[90m[FOCUSED CONTEXT]\x1b[0m ${summaryContext.length} msgs (~${ctxManager.estimateTokens(summaryContext)} tokens)`);
 
     const denseSummaryStream = await withRetry(async () => ollama.chat({
         model: agentsConfig[agentName].model,
@@ -60,6 +62,7 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
                 role: 'system', 
                 content: `
                     PROTOCOL: createDenseSummary(conversation: string): string
+                    MODE: FAST-SUMMARY-ONLY /no_think
 
                     You are a hyper-dense mental notepad following Chain-of-Density 2026.
                     Output ONLY 3-5 bullet points.
@@ -67,17 +70,20 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
                     - Maximize entity density and information per token
                     - No fluff, no repetition, no meta-commentary
                     - Return ONLY the bullets
+
+                    /no_think
                 `
             },
-            { role: 'user', content: `You are ${agentName}. Execute createDenseSummary on the full conversation:\n${JSON.stringify(messages)}` }
+            { role: 'user', content: `You are ${agentName}. Execute createDenseSummary on the full conversation:\n${JSON.stringify(summaryContext)}` }
         ],
         think: false,
         stream: true,
-        options: { temperature: 0.0, top_p: 0.8 }
+        options: { temperature: 0.0, top_p: 0.8, num_predict: 512 }
     }));
 
     let denseSummary = '';
-    process.stdout.write('\x1b[90m[DENSE CoD] \x1b[0m');
+
+    console.log('\n\x1b[90m[DENSE CoD LAYER] \x1b[0m');
     for await (const chunk of denseSummaryStream) {
         const content = chunk.message?.content || '';
         if (content) {
@@ -86,8 +92,6 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
         }
     }
 
-    console.log('');
-
     const trajectorySummaryStream = await withRetry(async () => ollama.chat({
         model: agentsConfig[agentName].model,
         messages: [
@@ -95,23 +99,27 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
                 role: 'system', 
                 content: `
                     PROTOCOL: createTrajectorySummary(conversation: string): object
+                    MODE: FAST-SUMMARY-ONLY /no_think
 
                     Output ONLY in this exact structure (3 sections max):
                     • KEY_EVENTS_AND_DECISIONS:
                     • CRITICAL_OPEN_QUESTIONS_NEXT_FOCUS:
                     • GOALS_PLAYBOOK_STATE:
                     No extra text.
+
+                    /no_think
                 `
             },
-            { role: 'user', content: `You are ${agentName}. Execute createTrajectorySummary on the full conversation:\n${JSON.stringify(messages)}` }
+            { role: 'user', content: `You are ${agentName}. Execute createTrajectorySummary on the full conversation:\n${JSON.stringify(summaryContext)}` }
         ],
         think: false,
         stream: true,
-        options: { temperature: 0.0, top_p: 0.8 }
+        options: { temperature: 0.0, top_p: 0.8, num_predict: 512 }
     }));
 
     let trajectorySummary = '';
-    process.stdout.write('\x1b[90m[TRAJECTORY LAYER] \x1b[0m');
+
+    console.log('\n\n\x1b[90m[TRAJECTORY LAYER] \x1b[0m');
     for await (const chunk of trajectorySummaryStream) {
         const content = chunk.message?.content || '';
         if (content) {
@@ -120,8 +128,6 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
         }
     }
 
-    console.log('');
-
     const verificationStream = await withRetry(async () => ollama.chat({
         model: agentsConfig[agentName].model,
         messages: [
@@ -129,15 +135,18 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
                 role: 'system', 
                 content: `
                     PROTOCOL: verifyAndConsolidate(denseSummary: string, trajectorySummary: string, conversation: string): JSON
+                    MODE: FAST-SUMMARY-ONLY /no_think
 
                     You are the agent's ruthless inner critic.
                     Output ONLY valid JSON matching this exact schema. No extra text.
                     {
-                    "trust_score": integer 0-100,
-                    "consistency_between_summaries": integer 0-100,
-                    "notes": array of max 3 ultra-short strings,
-                    "final_recommended_anchor": string (one-sentence consolidated playbook or empty)
+                        "trust_score": integer 0-100,
+                        "consistency_between_summaries": integer 0-100,
+                        "notes": array of max 3 ultra-short strings,
+                        "final_recommended_anchor": string (one-sentence consolidated playbook or empty)
                     }
+
+                    /no_think
                 `
             },
             {
@@ -146,28 +155,26 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
                     Execute verifyAndConsolidate with:
                     Dense CoD: ${denseSummary}
                     Trajectory Layer: ${trajectorySummary}
-                    Full Conversation: ${JSON.stringify(messages)}
+                    Full Conversation: ${JSON.stringify(summaryContext)}
                 `
             }
         ],
         think: false,
         stream: true,
         format: 'json',
-        options: { temperature: 0.0, top_p: 0.8 }
+        options: { temperature: 0.0, top_p: 0.8, num_predict: 512 }
     }));
 
     let verificationJson = '';
-    console.log(`\n🧐 [${agentName} MULTI-LAYER SANITY + CROSS-CHECK]`);
-    console.log('─'.repeat(110));
+
+    console.log('\n\n\x1b[90m[VERIFICATION LAYER] \x1b[0m');
     for await (const chunk of verificationStream) {
         const content = chunk.message?.content || '';
         if (content) {
-            process.stdout.write('\x1b[93m' + content + '\x1b[0m');
+            process.stdout.write(content);
             verificationJson += content;
         }
     }
-
-    console.log('\n' + '─'.repeat(110));
 
     let trustScore = 88, consistency = 90, notes = ['Multi-layer anchor captured'], finalRecommended = '';
     try {
@@ -186,7 +193,8 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
     ctxManager.addAnchor(trajectorySummary, Math.min(trustScore, consistency), 'trajectory');
 
     const prunedMessages = ctxManager.pruneAndCompact([...messages]);
-    console.log(`\x1b[32m[CONTEXT HEALTH] ${agentName} → ~${ctxManager.estimateTokens(prunedMessages)} tokens (H-MEM indexed + code-directive)\x1b[0m`);
+    console.log(`\n\n\x1b[90m[CONTEXT HEALTH]\x1b[0m ${agentName} → ~${ctxManager.estimateTokens(prunedMessages)} tokens (H-MEM indexed + code-directive)`);
+    console.log('─'.repeat(110));
 
     return {
         summary: denseSummary.trim(),
@@ -199,6 +207,8 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages) => {
 };
 
 const runAgent = async (agentName, initialMessages, agentTools) => {
+    const ctxManager = new ContextManager(agentName);
+
     let messages = [...initialMessages];
     let iteration = 0;
 
@@ -255,7 +265,7 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
                 }
             }
 
-            const contextUpdate = await streamMultiLayerVerifiedContextUpdate(agentName, messages);
+            const contextUpdate = await streamMultiLayerVerifiedContextUpdate(agentName, messages, ctxManager);
             messages = contextUpdate.messagesForNextTurn;
 
             if (contextUpdate.verified) {
