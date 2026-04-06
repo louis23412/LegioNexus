@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { startConversation } from './runAgent.js';
+import { startConversation } from './agents/runAgent.js';
 
 const main = async (userPrompt) => {
     const start = performance.now();
