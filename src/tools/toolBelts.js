@@ -42,7 +42,7 @@ const toolCollections = {
     ],
 
     code_tools : [
-        'test_code_snippet'
+        'run_js_code'
     ]
 };
 
