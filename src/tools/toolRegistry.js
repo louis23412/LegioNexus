@@ -40,7 +40,7 @@ export const createToolRegistry = async (runAgentFn, agentsConfig, inputStore) =
                         });
                     }
                 } catch (err) {
-                    console.error(`Failed to load tool ${entry.name}:`, err.message);
+                    console.error(`❌ Failed to load tool ${entry.name}:`, err.message);
                 }
             }
         }

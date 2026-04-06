@@ -178,5 +178,3 @@ export class InputStore extends EventEmitter {
         return obj;
     }
 }
-
-export const inputStore = new InputStore();

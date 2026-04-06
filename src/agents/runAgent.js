@@ -1,13 +1,16 @@
 import ollama from 'ollama';
-import { Chatroom } from '../chat/chat.js';
-import { inputStore } from '../inputs/inputs.js';
-import { createToolRegistry } from '../tools/tools.js';
+
+import { Chatroom } from '../chat/chatroom.js';
+import { InputStore } from '../inputs/inputStore.js';
 import { createAgentsConfig } from '../agents/agents.js';
+import { createToolRegistry } from '../tools/toolRegistry.js';
 import { ContextManager } from '../context/contextManager.js';
 
 let toolRegistry;
 const teamThoughtChains = {};
+
 const chatroom = new Chatroom(200);
+const inputStore = new InputStore();
 const agentsConfig = createAgentsConfig();
 
 const getToolHandler = (toolName, registry) => registry[toolName]?.handler || null;
