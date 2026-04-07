@@ -17,7 +17,7 @@ const getToolHandler = (toolName, registry) => registry[toolName]?.handler || nu
 
 const parseToolArguments = (rawArgs) => {
     let args = {};
-    
+
     if (rawArgs == null) return args;
 
     if (typeof rawArgs === 'string') {
@@ -42,123 +42,89 @@ const withRetry = async (fn, retries = 2) => {
     }
 };
 
-const captureThoughtChain = (messages, agentName) => {
+const captureThoughtChain = (messages, agentName, extraStats = {}) => {
     if (!teamThoughtChains[agentName]) teamThoughtChains[agentName] = [];
-    teamThoughtChains[agentName].push({ chainId: teamThoughtChains[agentName].length, thoughts: [...messages] });
+
+    const roughTokens = Math.ceil(messages.reduce((acc, msg) => {
+        let content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || {});
+        return acc + (content.length / 3.7);
+    }, 0));
+
+    const stats = {
+        chainId: teamThoughtChains[agentName].length,
+        numMessages: messages.length,
+        roughTokens,
+        iteration: extraStats.iteration || 0,
+        finalType: extraStats.finalType || 'unknown',
+        ...extraStats
+    };
+
+    teamThoughtChains[agentName].push({ ...stats, thoughts: [...messages] });
 };
 
 const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxManager) => {
-    const summaryContext = ctxManager.getFocusedSummaryContext(messages);
+    const summaryContext = ctxManager.getContextMessages(messages, true);
 
     console.log(`\n🧐 [${agentName} MULTI-LAYER SANITY CHECK]`);
     console.log('─'.repeat(110));
-
     console.log(`\x1b[90m[FOCUSED CONTEXT]\x1b[0m ${summaryContext.length} msgs (~${ctxManager.estimateTokens(summaryContext)} tokens)`);
 
-    const denseSummaryStream = await withRetry(async () => ollama.chat({
+    const denseConfig = {
         model: agentsConfig[agentName].model,
-        messages: [
-            { 
-                role: 'system', 
-                content: `
-                    PROTOCOL: createDenseSummary(conversation: string): string
-                    MODE: FAST-SUMMARY-ONLY /no_think
-
-                    You are a hyper-dense mental notepad following Chain-of-Density 2026.
-                    Output ONLY 3-5 bullet points.
-                    Rules:
-                    - Maximize entity density and information per token
-                    - No fluff, no repetition, no meta-commentary
-                    - Return ONLY the bullets
-
-                    /no_think
-                `
-            },
-            { role: 'user', content: `You are ${agentName}. Execute createDenseSummary on the full conversation:\n${JSON.stringify(summaryContext)}` }
-        ],
+        messages: [{
+            role: 'system',
+            content: `PROTOCOL: createDenseSummary: output ONLY 3-5 bullets. MAX density. /no_think\nFormat exactly:\nU: [USER INTENT]\nS: [SYSTEM DIRECTIVES]\nP: [CURRENT PLAYBOOK]\nNo extra text, newlines minimal, no fluff.`
+        }, {
+            role: 'user',
+            content: `You are ${agentName}. Dense-summary full conversation:\n${JSON.stringify(summaryContext)}`
+        }],
         think: false,
         stream: true,
         options: { temperature: 0.0, top_p: 0.8, num_predict: 512 }
-    }));
+    };
+
+    const trajectoryConfig = {
+        model: agentsConfig[agentName].model,
+        messages: [{
+            role: 'system',
+            content: `PROTOCOL: createTrajectorySummary: output ONLY labeled structure. /no_think\nU: [USER one sentence]\nS: [SYSTEM bullets]\nP: [KEY EVENTS] [OPEN QUESTIONS] [PLAYBOOK STATE]\nMinimal newlines, max density.`
+        }, {
+            role: 'user',
+            content: `You are ${agentName}. Trajectory-summary full conversation:\n${JSON.stringify(summaryContext)}`
+        }],
+        think: false,
+        stream: true,
+        options: { temperature: 0.0, top_p: 0.8, num_predict: 512 }
+    };
+
+    const [denseSummaryStream, trajectorySummaryStream] = await Promise.all([
+        withRetry(async () => ollama.chat(denseConfig)),
+        withRetry(async () => ollama.chat(trajectoryConfig))
+    ]);
 
     let denseSummary = '';
-
-    console.log('\n\x1b[90m[DENSE CoD LAYER] \x1b[0m');
+    console.log('\n\x1b[90m[DENSE LAYER]\x1b[0m');
     for await (const chunk of denseSummaryStream) {
         const content = chunk.message?.content || '';
-        if (content) {
-            process.stdout.write(content);
-            denseSummary += content;
-        }
+        if (content) { process.stdout.write(content); denseSummary += content; }
     }
 
-    const trajectorySummaryStream = await withRetry(async () => ollama.chat({
-        model: agentsConfig[agentName].model,
-        messages: [
-            { 
-                role: 'system', 
-                content: `
-                    PROTOCOL: createTrajectorySummary(conversation: string): object
-                    MODE: FAST-SUMMARY-ONLY /no_think
-
-                    Output ONLY in this exact structure (3 sections max):
-                    • KEY_EVENTS_AND_DECISIONS:
-                    • CRITICAL_OPEN_QUESTIONS_NEXT_FOCUS:
-                    • GOALS_PLAYBOOK_STATE:
-                    No extra text.
-
-                    /no_think
-                `
-            },
-            { role: 'user', content: `You are ${agentName}. Execute createTrajectorySummary on the full conversation:\n${JSON.stringify(summaryContext)}` }
-        ],
-        think: false,
-        stream: true,
-        options: { temperature: 0.0, top_p: 0.8, num_predict: 512 }
-    }));
-
     let trajectorySummary = '';
-
-    console.log('\n\n\x1b[90m[TRAJECTORY LAYER] \x1b[0m');
+    console.log('\n\n\x1b[90m[TRAJECTORY LAYER]\x1b[0m');
     for await (const chunk of trajectorySummaryStream) {
         const content = chunk.message?.content || '';
-        if (content) {
-            process.stdout.write(content);
-            trajectorySummary += content;
-        }
+        if (content) { process.stdout.write(content); trajectorySummary += content; }
     }
 
     const verificationStream = await withRetry(async () => ollama.chat({
         model: agentsConfig[agentName].model,
-        messages: [
-            { 
-                role: 'system', 
-                content: `
-                    PROTOCOL: verifyAndConsolidate(denseSummary: string, trajectorySummary: string, conversation: string): JSON
-                    MODE: FAST-SUMMARY-ONLY /no_think
-
-                    You are the agent's ruthless inner critic.
-                    Output ONLY valid JSON matching this exact schema. No extra text.
-                    {
-                        "trust_score": integer 0-100,
-                        "consistency_between_summaries": integer 0-100,
-                        "notes": array of max 3 ultra-short strings,
-                        "final_recommended_anchor": string (one-sentence consolidated playbook or empty)
-                    }
-
-                    /no_think
-                `
-            },
-            {
-                role: 'user',
-                content: `You are ${agentName}.
-                    Execute verifyAndConsolidate with:
-                    Dense CoD: ${denseSummary}
-                    Trajectory Layer: ${trajectorySummary}
-                    Full Conversation: ${JSON.stringify(summaryContext)}
-                `
-            }
-        ],
+        messages: [{
+            role: 'system',
+            content: `PROTOCOL: verifyAndConsolidate → ONLY JSON. /no_think {"trust_score":0-100,"consistency_between_summaries":0-100,"notes":[max3 short],"final_recommended_anchor":""}`
+        }, {
+            role: 'user',
+            content: `Dense:${denseSummary} Trajectory:${trajectorySummary} Conv:${JSON.stringify(summaryContext)}`
+        }],
         think: false,
         stream: true,
         format: 'json',
@@ -166,17 +132,13 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxMan
     }));
 
     let verificationJson = '';
-
-    console.log('\n\n\x1b[90m[VERIFICATION LAYER] \x1b[0m');
+    console.log('\n\n\x1b[90m[VERIFY LAYER]\x1b[0m');
     for await (const chunk of verificationStream) {
         const content = chunk.message?.content || '';
-        if (content) {
-            process.stdout.write(content);
-            verificationJson += content;
-        }
+        if (content) { process.stdout.write(content); verificationJson += content; }
     }
 
-    let trustScore = 88, consistency = 90, notes = ['Multi-layer anchor captured'], finalRecommended = '';
+    let trustScore = 88, consistency = 90, notes = ['anchor ok'], finalRecommended = '';
     try {
         const parsed = JSON.parse(verificationJson);
         trustScore = Math.max(0, Math.min(100, parsed.trust_score || 88));
@@ -184,16 +146,16 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxMan
         notes = Array.isArray(parsed.notes) ? parsed.notes.slice(0, 3) : notes;
         finalRecommended = parsed.final_recommended_anchor || '';
     } catch (e) {
-        console.warn('\x1b[33m[VERIFICATION PARSE FALLBACK]\x1b[0m');
+        console.warn('\x1b[33m[VERIFY FALLBACK]\x1b[0m');
     }
 
-    const finalInjection = `✅ MULTI-LAYER VERIFIED PLAYBOOK (trust ${trustScore}/100 | consistency ${consistency}/100) • ${notes.join(' • ')} ${finalRecommended ? `• ${finalRecommended}` : ''}`;
+    const finalInjection = `✅ VERIFIED PLAYBOOK T${trustScore}C${consistency} U:${notes[0]||'—'} S:${notes[1]||'—'} P:${finalRecommended||notes[2]||'—'}`;
 
-    ctxManager.addAnchor(denseSummary, trustScore, 'ultra-dense');
+    ctxManager.addAnchor(denseSummary, trustScore, 'dense');
     ctxManager.addAnchor(trajectorySummary, Math.min(trustScore, consistency), 'trajectory');
 
-    const prunedMessages = ctxManager.pruneAndCompact([...messages]);
-    console.log(`\n\n\x1b[90m[CONTEXT HEALTH]\x1b[0m ${agentName} → ~${ctxManager.estimateTokens(prunedMessages)} tokens (H-MEM indexed + code-directive)`);
+    const prunedMessages = ctxManager.getContextMessages([...messages], false);
+    console.log(`\n\n\x1b[90m[CTX HEALTH]\x1b[0m ${agentName} ~${ctxManager.estimateTokens(prunedMessages)}t`);
     console.log('─'.repeat(110));
 
     return {
@@ -208,6 +170,7 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxMan
 
 const runAgent = async (agentName, initialMessages, agentTools) => {
     const ctxManager = new ContextManager(agentName);
+    ctxManager.setCore([...initialMessages]);
 
     let messages = [...initialMessages];
     let iteration = 0;
@@ -216,7 +179,7 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
         iteration++;
         const result = await withRetry(async () => ollama.chat({
             model: agentsConfig[agentName].model,
-            options: { ...agentsConfig[agentName].options, temperature: 0.7, top_p: 0.8 },
+            options: agentsConfig[agentName].options,
             messages,
             tools: agentTools,
             think: true,
@@ -229,30 +192,30 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
         for await (const chunk of result) {
             const msg = chunk.message || {};
             if (msg.thinking) {
-                if (!inThinking) { inThinking = true; console.log(`\n🧠 [${agentName} THINKING TRACE]`); console.log('─'.repeat(110)); }
+                if (!inThinking) { inThinking = true; console.log(`\n🧠 [${agentName} THINK]`); }
                 process.stdout.write('\x1b[34m' + msg.thinking + '\x1b[0m');
                 assistantMessage.thinking += msg.thinking;
             }
             if (msg.content) {
-                if (!inContent) { inContent = true; console.log('\n' + '─'.repeat(110)); console.log(`\n💬 [${agentName} FINAL RESPONSE]`); console.log('─'.repeat(110)); }
+                if (!inContent) { inContent = true; console.log(`\n💬 [${agentName} RESP]`); }
                 process.stdout.write('\x1b[36m' + msg.content + '\x1b[0m');
                 assistantMessage.content += msg.content;
             }
             if (msg.tool_calls?.length > 0) assistantMessage.tool_calls.push(...msg.tool_calls);
         }
-        console.log('\n' + '─'.repeat(110));
 
+        console.log('\n' + '─'.repeat(110));
         messages.push(assistantMessage);
 
         if (assistantMessage.tool_calls?.length > 0) {
             for (const toolCall of assistantMessage.tool_calls) {
                 const functionName = toolCall.function.name;
-                console.log(`\n🔧 [${agentName} USE TOOL (${functionName})]`);
-                console.log('─'.repeat(110));
+                console.log(`\n🔧 [${agentName} TOOL ${functionName}]`);
+
                 const args = parseToolArguments(toolCall.function.arguments);
 
                 if (functionName === 'finalize_answer') {
-                    captureThoughtChain(messages, agentName);
+                    captureThoughtChain(messages, agentName, { iteration, finalType: 'finalize' });
                     return { content: args.final_answer || '[No answer]', explanation: args.consensus_explanation || '', finalized: true, messages };
                 }
 
@@ -261,7 +224,7 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
                     const toolResult = await handler(args, { agentName, chatroom });
                     messages.push({ role: 'tool', name: functionName, content: JSON.stringify(toolResult) });
                 } else {
-                    console.warn(`⚠️ No handler for tool: ${functionName}`);
+                    console.warn(`⚠️ No handler ${functionName}`);
                 }
             }
 
@@ -269,24 +232,21 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
             messages = contextUpdate.messagesForNextTurn;
 
             if (contextUpdate.verified) {
-                messages.push({
-                    role: 'tool',
-                    name: 'context_anchor_multi_layer',
-                    content: contextUpdate.injection
-                });
+                messages.push({ role: 'tool', name: 'ctx_anchor', content: contextUpdate.injection });
             }
+
             continue;
         }
 
         if (assistantMessage.content?.trim()) {
-            captureThoughtChain(messages, agentName);
+            captureThoughtChain(messages, agentName, { iteration, finalType: 'content' });
             return { content: assistantMessage.content.trim(), messages };
         }
         break;
     }
 
-    captureThoughtChain(messages, agentName);
-    return { content: `[${agentName}] Max iterations reached.`, messages };
+    captureThoughtChain(messages, agentName, { iteration, finalType: 'max_it' });
+    return { content: `[${agentName}] Max iterations.`, messages };
 };
 
 export const startConversation = async (userPrompt) => {
@@ -295,7 +255,7 @@ export const startConversation = async (userPrompt) => {
 
     const totalLeaders = Object.entries(agentsConfig).filter(([_, cfg]) => cfg.isLeader);
     if (totalLeaders.length !== 1) {
-        console.log(`❌ Only one leader allowed. Found: ${totalLeaders.length}`);
+        console.log(`❌ Exactly one leader needed. Found: ${totalLeaders.length}`);
         process.exit(1);
     }
 
@@ -305,22 +265,14 @@ export const startConversation = async (userPrompt) => {
         { role: 'user', content: userPrompt }
     ];
 
-    const leaderTools = leaderConfig.tools
-        .map(name => toolRegistry[name]?.definition)
-        .filter(Boolean);
+    const leaderTools = leaderConfig.tools.map(name => toolRegistry[name]?.definition).filter(Boolean);
 
-    console.log('\n💡 [USER QUESTION]');
-    console.log('─'.repeat(110));
+    console.log('\n💡 [USER QUERY]');
     console.log(`\x1b[35m${userPrompt}\x1b[0m`);
-    console.log('─'.repeat(110));
 
     try {
         const leaderResult = await runAgent(leaderConfig.name, leaderMessages, leaderTools);
-        return {
-            leaderResult,
-            teamThoughtChains,
-            chatHistory: chatroom.dump()
-        };
+        return { leaderResult, teamThoughtChains, chatHistory: chatroom.dump() };
     } catch (err) {
         console.error(err);
         process.exit(1);
