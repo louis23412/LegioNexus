@@ -65,7 +65,7 @@ const captureThoughtChain = (messages, agentName, extraStats = {}) => {
 };
 
 const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxManager) => {
-    const summaryContext = ctxManager.getContextMessages(messages, true);
+    const summaryContext = ctxManager.getContextMessages(messages);
 
     console.log(`\n🧐 [${agentName} MULTI-LAYER SANITY CHECK]`);
     console.log('─'.repeat(110));
@@ -156,7 +156,7 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxMan
     ctxManager.addAnchor(denseSummary, trustScore, 'dense');
     ctxManager.addAnchor(trajectorySummary, Math.min(trustScore, consistency), 'trajectory');
 
-    const prunedMessages = ctxManager.getContextMessages([...messages], false);
+    const prunedMessages = ctxManager.getContextMessages(messages);
     console.log(`\n\n\x1b[90m[CTX HEALTH]\x1b[0m ${agentName} ~${ctxManager.estimateTokens(prunedMessages)}t`);
     console.log('─'.repeat(110));
 

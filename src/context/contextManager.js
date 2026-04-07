@@ -42,34 +42,11 @@ export class ContextManager {
         }
     }
 
-    getContextMessages(fullMessages, forSummary = false) {
-        if (fullMessages.length === 0) return [];
-
-        const system = fullMessages[0];
-
-        const pinnedSystem = this.systemDirectives ? [{
-            role: 'tool',
-            name: 'S',
-            content: `S:${this.systemDirectives}`
-        }] : [];
-
-        const pinnedUser = this.pinnedUserIntent ? [{
-            role: 'tool',
-            name: 'U',
-            content: `U:${this.pinnedUserIntent}`
-        }] : [];
-
-        const pinnedTool = this.pinnedToolHeader ? [{
-            role: 'tool',
-            name: 'S',
-            content: `S:${this.pinnedToolHeader}`
-        }] : [];
-
-        const clarityMessage = {
-            role: 'tool',
-            name: 'CLARITY',
-            content: this.clarityDirective
-        };
+    getContextMessages(fullMessages) {
+        const pinnedSystem = { role: 'system', name: 'S', content: this.systemDirectives };
+        const pinnedUser = { role: 'user', name: 'U', content: this.pinnedUserIntent };
+        const pinnedTool = { role: 'tool', name: 'S', content: this.pinnedToolHeader };
+        const clarityMessage = { role: 'tool', name: 'CLARITY', content: this.clarityDirective };
 
         const anchorMessages = this.anchors.map(a => ({
             role: 'tool',
@@ -79,30 +56,20 @@ export class ContextManager {
 
         const memoryContent = `MEM:${this.agentName} Ldr. PRI:1U 2S 3A. Idx route. No halluc. ` +
             this.anchors.map((a, i) => `A${i}(${a.trustScore}):${a.summary.substring(0, 180)}...`).join(' | ');
+        const memoryAwareness = { role: 'tool', name: 'MEM', content: memoryContent };
 
-        const memoryAwareness = {
-            role: 'tool',
-            name: 'MEM',
-            content: memoryContent
-        };
-
-        if (forSummary) {
-            let recent = fullMessages.slice(-8);
-            if (recent.length > 0 && recent[recent.length-1]?.role === 'tool' && recent.length < fullMessages.length) {
-                const lastAss = fullMessages.length - 2;
-                if (fullMessages[lastAss]?.role === 'assistant') {
-                    recent = fullMessages.slice(Math.max(0, lastAss - 3));
-                }
-            }
-            return [system, ...pinnedSystem, ...pinnedUser, ...pinnedTool, clarityMessage, ...anchorMessages, memoryAwareness, ...recent];
-        }
-
-        const tokenCount = this.estimateTokens(fullMessages);
-        if (tokenCount < 9000) return fullMessages;
-
-        console.log(`\x1b[33m[PRUNE] ${this.agentName} ${fullMessages.length}msg ~${tokenCount}t\x1b[0m`);
         const recent = fullMessages.slice(-this.maxRecentTurns);
         
-        return [system, ...pinnedSystem, ...pinnedUser, ...pinnedTool, clarityMessage, ...anchorMessages, memoryAwareness, ...recent];
+        const curatedContext = [pinnedSystem, pinnedUser, pinnedTool, clarityMessage, ...anchorMessages, memoryAwareness, ...recent];
+
+        const uniqueByRef = [...new Set(curatedContext)];
+        const seen = new Set();
+        
+        return uniqueByRef.filter(msg => {
+            const key = JSON.stringify(msg);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
     }
 }
