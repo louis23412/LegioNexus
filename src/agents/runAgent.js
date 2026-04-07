@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import ollama from 'ollama';
 
 import { Chatroom } from '../chat/chatroom.js';
@@ -168,11 +170,22 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxMan
     };
 };
 
-const runAgent = async (agentName, initialMessages, agentTools) => {
+const runAgent = async (agentName, userPrompt, toolHeader) => {
     const ctxManager = new ContextManager(agentName);
-    ctxManager.setCore([...initialMessages]);
 
-    let messages = [...initialMessages];
+    const selectedConfig = agentsConfig[agentName];
+
+    const coreMessages = [
+        { role: 'system', content: selectedConfig.system },
+        { role: 'user', content: userPrompt },
+        { role: 'tool', content: toolHeader}
+    ];
+
+    const agentTools = selectedConfig.tools.map(name => toolRegistry[name]?.definition).filter(Boolean);
+
+    ctxManager.setCore(coreMessages);
+
+    let messages = coreMessages;
     let iteration = 0;
 
     while (iteration < agentsConfig[agentName].maxIterations) {
@@ -249,32 +262,58 @@ const runAgent = async (agentName, initialMessages, agentTools) => {
     return { content: `[${agentName}] Max iterations.`, messages };
 };
 
-export const startConversation = async (userPrompt) => {
+const saveConversation = (cId) => {
+    const logDir = path.join(import.meta.dirname, '..', '..', 'chat_logs');
+    const filePath = path.join(logDir, `${cId}.json`);
+
+    if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
+    fs.writeFileSync(filePath, JSON.stringify({
+        thought_chains : teamThoughtChains,
+        team_chat : chatroom.dump()
+    }));
+}
+
+export const startConversation = async (userPrompt, userAlias) => {
+    const start = performance.now();
+    const conversationId = (Math.random() * start).toString(36);
+
     toolRegistry = await createToolRegistry(runAgent, agentsConfig, inputStore);
-    chatroom.sendMessage('User', userPrompt, { topic: 'general', metadata: { type: 'user_query', source: 'human' } });
+
+    chatroom.sendMessage(userAlias, userPrompt, { topic: 'general', metadata: { type: 'user_query', source: 'human' } });
 
     const totalLeaders = Object.entries(agentsConfig).filter(([_, cfg]) => cfg.isLeader);
+
     if (totalLeaders.length !== 1) {
         console.log(`❌ Exactly one leader needed. Found: ${totalLeaders.length}`);
         process.exit(1);
     }
 
-    const leaderConfig = agentsConfig[totalLeaders[0][0]];
-    const leaderMessages = [
-        { role: 'system', content: leaderConfig.system },
-        { role: 'user', content: userPrompt }
-    ];
-
-    const leaderTools = leaderConfig.tools.map(name => toolRegistry[name]?.definition).filter(Boolean);
-
     console.log('\n💡 [USER QUERY]');
     console.log(`\x1b[35m${userPrompt}\x1b[0m`);
 
     try {
-        const leaderResult = await runAgent(leaderConfig.name, leaderMessages, leaderTools);
-        return { leaderResult, teamThoughtChains, chatHistory: chatroom.dump() };
-    } catch (err) {
-        console.error(err);
-        process.exit(1);
-    }
+        const leaderResult = await runAgent(
+            totalLeaders[0][0], 
+            userPrompt, 
+            `The user addressing you has set their preferred alias to: ${userAlias}. Refer to them by this name.`
+        );
+
+        console.log('\n🏆 [FINAL TEAM ANSWER]');
+        console.log('─'.repeat(90));
+
+        if (leaderResult.explanation) console.log(`📋 Consensus explanation:\n\x1b[33m${leaderResult.explanation}\x1b[0m\n`);
+
+        console.log('🤖 Final answer:')
+        console.log(`\x1b[32m${leaderResult.content}\x1b[0m`);
+
+        saveConversation(conversationId);
+
+        const duration = ((performance.now() - start) / 1000).toFixed(2);
+        console.log(`\n⏳ Total time: ${duration}s | 💾 Full team thoughts: /chat_logs/${conversationId}.json`);
+        console.log('─'.repeat(90) + '\n');
+
+        return { success : true };
+    } 
+    
+    catch (error) { return { success : false, error } }
 };

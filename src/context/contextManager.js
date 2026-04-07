@@ -6,6 +6,7 @@ export class ContextManager {
         this.anchors = [];
         this.systemDirectives = '';
         this.pinnedUserIntent = '';
+        this.pinnedToolHeader = '';
 
         this.clarityDirective = 'CLARITY: MAX internal density. Anchor refs by index only. Accuracy > speed. No fluff.';
     }
@@ -13,6 +14,7 @@ export class ContextManager {
     setCore(initialMessages) {
         this.systemDirectives = initialMessages[0]?.content || '';
         this.pinnedUserIntent = initialMessages[1]?.content || '';
+        this.pinnedToolHeader = initialMessages[2]?.content || '';
     }
 
     estimateTokens(messages) {
@@ -57,6 +59,12 @@ export class ContextManager {
             content: `U:${this.pinnedUserIntent}`
         }] : [];
 
+        const pinnedTool = this.pinnedToolHeader ? [{
+            role: 'tool',
+            name: 'S',
+            content: `S:${this.pinnedToolHeader}`
+        }] : [];
+
         const clarityMessage = {
             role: 'tool',
             name: 'CLARITY',
@@ -86,7 +94,7 @@ export class ContextManager {
                     recent = fullMessages.slice(Math.max(0, lastAss - 3));
                 }
             }
-            return [system, ...pinnedSystem, ...pinnedUser, clarityMessage, ...anchorMessages, memoryAwareness, ...recent];
+            return [system, ...pinnedSystem, ...pinnedUser, ...pinnedTool, clarityMessage, ...anchorMessages, memoryAwareness, ...recent];
         }
 
         const tokenCount = this.estimateTokens(fullMessages);
@@ -95,6 +103,6 @@ export class ContextManager {
         console.log(`\x1b[33m[PRUNE] ${this.agentName} ${fullMessages.length}msg ~${tokenCount}t\x1b[0m`);
         const recent = fullMessages.slice(-this.maxRecentTurns);
         
-        return [system, ...pinnedSystem, ...pinnedUser, clarityMessage, ...anchorMessages, memoryAwareness, ...recent];
+        return [system, ...pinnedSystem, ...pinnedUser, ...pinnedTool, clarityMessage, ...anchorMessages, memoryAwareness, ...recent];
     }
 }
