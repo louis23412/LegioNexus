@@ -10,9 +10,10 @@ export const memberDefinitions = [
         maxThinkChain : 150,
         model : 'qwen3.5',
         options : {
-            temperature: 0,
-            top_p: 0.1,
-            top_k: 10,
+            temperature: 1,
+            presence_penalty : 1.5,
+            top_p: 0.95,
+            top_k: 20,
         },
 
         personalityGuideline : `
@@ -35,9 +36,10 @@ export const memberDefinitions = [
         maxThinkChain : 100,
         model : 'qwen3.5',
         options : {
-            temperature: 0,
-            top_p: 0.1,
-            top_k: 10,
+            temperature: 1,
+            presence_penalty : 1.5,
+            top_p: 0.95,
+            top_k: 20,
         },
 
         personalityGuideline : `
@@ -55,9 +57,10 @@ export const memberDefinitions = [
         maxThinkChain : 100,
         model : 'qwen3.5',
         options : {
-            temperature: 0,
-            top_p: 0.1,
-            top_k: 10,
+            temperature: 1,
+            presence_penalty : 1.5,
+            top_p: 0.95,
+            top_k: 20,
         },
 
         personalityGuideline : `
@@ -75,9 +78,10 @@ export const memberDefinitions = [
         maxThinkChain : 100,
         model : 'qwen3.5',
         options : {
-            temperature: 0,
-            top_p: 0.1,
-            top_k: 10,
+            temperature: 1,
+            presence_penalty : 1.5,
+            top_p: 0.95,
+            top_k: 20,
         },
 
         personalityGuideline : `

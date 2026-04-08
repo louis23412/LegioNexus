@@ -4,17 +4,20 @@ export class ContextManager {
         this.maxRecentTurns = maxRecentTurns;
         this.maxAnchors = maxAnchors;
         this.anchors = [];
-        this.systemDirectives = '';
-        this.pinnedUserIntent = '';
-        this.pinnedToolHeader = '';
+        this.systemDirectives = {};
+        this.pinnedUserIntent = {};
+        this.pinnedToolHeader = {};
 
-        this.clarityDirective = 'CLARITY: MAX internal density. Anchor refs by index only. Accuracy > speed. No fluff.';
+        this.clarityDirective = {
+            role : 'system',
+            content : 'CLARITY: MAX internal density. Anchor refs by index only. Accuracy > speed. No fluff.'
+        };
     }
 
     setCore(initialMessages) {
-        this.systemDirectives = initialMessages[0]?.content || '';
-        this.pinnedUserIntent = initialMessages[1]?.content || '';
-        this.pinnedToolHeader = initialMessages[2]?.content || '';
+        this.systemDirectives = { role : 'system', eventId : initialMessages[0].eventId, content : initialMessages[0].content };
+        this.pinnedUserIntent = { role : 'user', eventId : initialMessages[1].eventId, content : initialMessages[1].content };
+        this.pinnedToolHeader = { role : 'system', eventId : initialMessages[2].eventId, content : initialMessages[2].content };
     }
 
     estimateTokens(messages) {
@@ -43,30 +46,20 @@ export class ContextManager {
     }
 
     getContextMessages(fullMessages) {
-        const pinnedSystem = { role: 'system', name: 'S', content: this.systemDirectives };
-        const pinnedUser = { role: 'user', name: 'U', content: this.pinnedUserIntent };
-        const pinnedTool = { role: 'tool', name: 'S', content: this.pinnedToolHeader };
-        const clarityMessage = { role: 'tool', name: 'CLARITY', content: this.clarityDirective };
-
-        const anchorMessages = this.anchors.map(a => ({
-            role: 'tool',
-            name: `A${a.type[0]}`,
-            content: `A${a.index}(${a.trustScore}):${a.summary.substring(0, 220)}`
-        }));
+        const memPurgedMessages = fullMessages.filter(msg => msg?.name !== 'MEM');
+        const recent = memPurgedMessages.slice(-this.maxRecentTurns);
 
         const memoryContent = `MEM:${this.agentName} Ldr. PRI:1U 2S 3A. Idx route. No halluc. ` +
-            this.anchors.map((a, i) => `A${i}(${a.trustScore}):${a.summary.substring(0, 180)}...`).join(' | ');
-        const memoryAwareness = { role: 'tool', name: 'MEM', content: memoryContent };
-
-        const recent = fullMessages.slice(-this.maxRecentTurns);
+            this.anchors.map((a, i) => `A${i}(${a.trustScore}):${a.summary}...`).join(' | ');
+        const memoryAwareness = { role: 'system', eventId: 'SYS-MEM', content: memoryContent };
         
-        const curatedContext = [pinnedSystem, pinnedUser, pinnedTool, clarityMessage, ...anchorMessages, memoryAwareness, ...recent];
+        const curatedContext = this.anchors.length > 0 
+            ? [this.systemDirectives, this.pinnedUserIntent, this.pinnedToolHeader, this.clarityDirective, memoryAwareness, ...recent] 
+            : [this.systemDirectives, this.pinnedUserIntent, this.pinnedToolHeader, ...recent];
 
-        const uniqueByRef = [...new Set(curatedContext)];
         const seen = new Set();
-        
-        return uniqueByRef.filter(msg => {
-            const key = JSON.stringify(msg);
+        return curatedContext.filter(msg => {
+            const key = msg.eventId;
             if (seen.has(key)) return false;
             seen.add(key);
             return true;
