@@ -45,23 +45,6 @@ export class ContextManager {
 
         this.anchors.push(entry);
 
-        if (this.anchors.length > this.maxAnchors) {
-            let worstIndex = 0;
-            let worstScore = this.anchors[0].trustScore;
-            let worstTs = this.anchors[0].timestamp;
-
-            for (let i = 1; i < this.anchors.length; i++) {
-                const a = this.anchors[i];
-                if (a.trustScore < worstScore ||
-                    (a.trustScore === worstScore && a.timestamp < worstTs)) {
-                    worstScore = a.trustScore;
-                    worstTs = a.timestamp;
-                    worstIndex = i;
-                }
-            }
-            this.anchors.splice(worstIndex, 1);
-        }
-
         return this.anchorSeq;
     }
 
@@ -69,12 +52,17 @@ export class ContextManager {
         const memPurgedMessages = fullMessages.filter(msg => msg?.eventId !== 'SYS-MEM');
         const recent = memPurgedMessages.slice(-this.maxRecentTurns);
 
-        const memoryContent = `MEM:${this.agentName} Ldr. PRI:1U 2S 3A. ID route. No halluc. ` +
-            this.anchors.map(a => `A${a.id}(${a.trustScore}):${a.summary}...`).join(' | ');
+        const visibleAnchorIds = recent.filter((x) => x.eventId.includes('ctx-')).map((i) => Number(i.eventId.slice(4)));
+        const historyOnlyAnchors = this.anchors.filter((a) => !visibleAnchorIds.includes(a.id));
+
+        const currentAnchorHistory = historyOnlyAnchors.slice(-this.maxAnchors);
+
+        const memoryContent = `[CTX_MEM:${this.agentName} PRI:1U 2S 3A. ID route only. No halluc.] ` +
+            currentAnchorHistory.map(a => `A${a.id}(${a.trustScore}):${a.summary}...`).join(' | ');
         
-        const memoryAwareness = { role: 'system', name: 'system', eventId: 'SYS-MEM', content: memoryContent };
+        const memoryAwareness = { role: 'system', name: 'system-context-memory', eventId: 'SYS-MEM', content: memoryContent };
         
-        const curatedContext = this.anchors.length > 0 
+        const curatedContext = currentAnchorHistory.length > 0 
             ? [this.systemDirectives, this.pinnedUserIntent, this.pinnedToolHeader, this.clarityDirective, memoryAwareness, ...recent] 
             : [this.systemDirectives, this.pinnedUserIntent, this.pinnedToolHeader, ...recent];
 

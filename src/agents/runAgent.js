@@ -71,7 +71,7 @@ const jaccardSimilarity = (setA, setB) => {
 const extractProtocolParts = (text) => {
     if (!text || typeof text !== 'string' || text.trim() === '') {
         console.warn('\x1b[33m[PROTOCOL PARSER] Empty or invalid text\x1b[0m');
-        return { U: '—', S: '—', P: '—', T: '—' };
+        return { U: '—', S: '—', P: '—', T: '—', valid: false };
     }
 
     const memRegex = /\[?MEM:([A-Z]):\s*([^\]]+?)\]?(?=\s*\[?MEM:|$)/gi;
@@ -96,7 +96,9 @@ const extractProtocolParts = (text) => {
         }
     }
 
-    return parts;
+    const valid = !Object.values(parts).some(v => v === '—');
+
+    return { ...parts, valid };
 };
 
 const truncateForEmbedding = (messagesArray) => {
@@ -305,8 +307,8 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxMan
                 content: `
                     /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
 
-                    PROTOCOL: verifyAndConsolidate → ONLY JSON.
-                    Format: {"trust_score":0-100,"consistency_between_summaries":0-100,"notes":[max3 short]}
+                    PROTOCOL: verify_and_consolidate → ONLY JSON.
+                    Format: {"trust_score":0-100,"consistency_between_summaries":0-100}
                     Output: EXACTLY in protocol format. Max 1.
 
                     No extra text, no newlines, no artifacts.
@@ -317,14 +319,29 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxMan
             {
                 role: 'user',
                 content: `
-                    Dense:${denseSummary}
-                    Trajectory:${trajectorySummary}
-                    BestSummary (objective winner):${bestSummary}
-                    Conv:${JSON.stringify(modelSummaryContext)}
-                    RELIABILITY METRICS:
-                    SemanticSimDense:${simDense.toFixed(3)} Traj:${simTraj.toFixed(3)} Self:${simSelf.toFixed(3)}
-                    KeywordJaccardDense:${jaccDense.toFixed(3)} Traj:${jaccTraj.toFixed(3)}
-                    ReliabilityDense:${reliabilityDense} ReliabilityTraj:${reliabilityTraj}  
+                    Strictly follow verify_and_consolidate protocol and evaluate both summaries against the main conversation:
+
+                    1. Dense style summary:
+                    ${denseSummary}
+
+                    2. Trajectory style summary:
+                    ${trajectorySummary}
+
+                    Semantic similarity:
+                    - Dense vs Full conversation : ${simDense.toFixed(3)} 
+                    - Trajectory vs Full conversation : ${simTraj.toFixed(3)} 
+                    - Dense vs Trajectory : ${simSelf.toFixed(3)}
+
+                    Jaccard keyword similarity:
+                    - Dense : ${jaccDense.toFixed(3)} 
+                    - Trajectory : ${jaccTraj.toFixed(3)}
+
+                    Reliability score (semantic x 0.7 * jaccard * 0.3):
+                    - Dense : ${reliabilityDense} 
+                    - Trajectory : ${reliabilityTraj}
+
+                    Full conversation:
+                    ${JSON.stringify(modelSummaryContext)}
                 `
             }
         ],
@@ -341,27 +358,25 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxMan
         if (content) { process.stdout.write(content); verificationJson += content; }
     }
 
-    let trustScore = 88, consistency = 90, notes = ['anchor ok'];
+    let trustScore = 50, consistency = 50;
     try {
         const parsed = JSON.parse(verificationJson);
-        trustScore = Math.max(0, Math.min(100, parsed.trust_score || 88));
-        consistency = Math.max(0, Math.min(100, parsed.consistency_between_summaries || 90));
-        notes = Array.isArray(parsed.notes) ? parsed.notes.slice(0, 3) : notes;
-    } catch (e) {
-        console.warn('\x1b[33m[VERIFY FALLBACK]\x1b[0m');
-    }
+        trustScore = Math.max(0, Math.min(100, parsed.trust_score || 50));
+        consistency = Math.max(0, Math.min(100, parsed.consistency_between_summaries || 50));
+    } catch (e) {}
 
-    const prunedMessages = ctxManager.getContextMessages(messages);
+    let prunedMessages = ctxManager.getContextMessages(messages);
 
-    const { U, S, P, T } = extractProtocolParts(bestSummary);
+    const { U, S, P, T, valid } = extractProtocolParts(bestSummary);
     const anchorTrustScore = Number(((trustScore + consistency + bestReliability) / 3).toFixed(3));
 
-    if (anchorTrustScore >= 50) {
+    if (valid && anchorTrustScore >= 50) {
         const anchorId = ctxManager.addAnchor(bestSummary, Math.min(trustScore, bestReliability), bestType);
-
-        // To-do later: inject anchor into messages as system message
-
         const finalInjection = `[CTX_ANC_${anchorId}]=[U:${U}][S:${S}][P:${P}][T:${T}]`;
+
+        prunedMessages.push({role: 'system', name: 'system-context-anchor', eventId: `ctx-${anchorId}`, content:finalInjection});
+        prunedMessages = ctxManager.getContextMessages(prunedMessages);
+
         console.log(`\n\n\x1b[90m[ANCHOR CREATED]\x1b[0m ${finalInjection}`);
     } else {
         console.log(`\n\n\x1b[90m[ANCHOR SKIPPED]\x1b[0m Verification failed — keeping more raw turns instead`);
@@ -455,9 +470,6 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         }
 
         if (assistantMessage.content?.trim()) {
-            console.log(ctxManager.getContextMessages(messages))
-            process.exit()
-
             captureThoughtChain(messages, agentName, { iteration, finalType: 'content' });
             return { content: assistantMessage.content.trim(), messages };
         }
