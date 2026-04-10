@@ -16,6 +16,9 @@ const chatroom = new Chatroom(200);
 const inputStore = new InputStore();
 const agentsConfig = createAgentsConfig();
 
+const EMBED_MAX_TOKENS = 35000;
+const embedModel = 'qwen3-embedding';
+
 const getToolHandler = (toolName, registry) => registry[toolName]?.handler || null;
 
 const parseToolArguments = (rawArgs) => {
@@ -42,7 +45,6 @@ const withRetry = async (fn, retries = 2) => {
     }
 };
 
-// ====================== RELIABILITY HELPERS ======================
 const cosineSimilarity = (a, b) => {
     if (!a || !a.length || !b || !b.length || a.length !== b.length) return 0;
     let dot = 0, magA = 0, magB = 0;
@@ -66,59 +68,36 @@ const jaccardSimilarity = (setA, setB) => {
     return union.size === 0 ? 0 : intersection.size / union.size;
 };
 
-// ====================== PROTOCOL PARSER (GENERIC, NO HARD-CODED NAMES) ======================
 const extractProtocolParts = (text) => {
-    if (!text || typeof text !== 'string') {
+    if (!text || typeof text !== 'string' || text.trim() === '') {
         console.warn('\x1b[33m[PROTOCOL PARSER] Empty or invalid text\x1b[0m');
-        return { U: '—', S: '—', P: '—' };
+        return { U: '—', S: '—', P: '—', T: '—' };
     }
 
-    const extract = (patterns) => {
-        for (const pattern of patterns) {
-            const match = text.match(pattern);
-            if (match && match[1]) {
-                return match[1].trim();
-            }
+    const memRegex = /\[?MEM:([A-Z]):\s*([^\]]+?)\]?(?=\s*\[?MEM:|$)/gi;
+
+    const parts = { U: '—', S: '—', P: '—', T: '—' };
+
+    let match;
+    while ((match = memRegex.exec(text)) !== null) {
+        const key = match[1];
+        const value = match[2].trim();
+        if (key in parts) {
+            parts[key] = value || '—';
         }
-        return '—';
-    };
+    }
 
-    // U extraction - pure label based, works for both styles
-    const U = extract([
-        /MEM:U:\s*([^\n]+)/i,
-        /U:\s*([^\n]+)/i,
-        /MEM:EVENT\d*:\s*U\([^)]+\)\s*([^\n]+)/i,   // capture content after U(...) in EVENT lines
-        /MEM:EVENT\d*:\s*([^\n]+)/i                 // fallback any EVENT line content
-    ]);
+    if (Object.values(parts).every(v => v === '—')) {
+        const fallbackRegex = /MEM:([A-Z]):\s*([^\n]+)/gi;
+        while ((match = fallbackRegex.exec(text)) !== null) {
+            const key = match[1];
+            const value = match[2].trim();
+            if (key in parts) parts[key] = value || '—';
+        }
+    }
 
-    // S extraction - pure label based
-    const S = extract([
-        /MEM:S:\s*([^\n]+)/i,
-        /S:\s*([^\n]+)/i,
-        /MEM:EVENT\d*:\s*S\([^)]+\)\s*([^\n]+)/i,   // capture content after S(...) in EVENT lines
-        /MEM:EVENT\d*:\s*([^\n]+)/i                 // fallback any EVENT line content
-    ]);
-
-    // P extraction - handles STATE and P labels, plus multi-line fallback
-    const P = extract([
-        /MEM:P:\s*([^\n]+)/i,
-        /P:\s*([^\n]+)/i,
-        /MEM:STATE:\s*([^\n]+)/i,
-        /MEM:STATE:\s*(.+?)(?=\s*MEM:|$)/is,
-        /(?:MEM:EVENT\d*:\s*.*?)+\s*MEM:STATE:\s*([^\n]+)/is,
-        /MEM:(?!U:|S:|P:|EVENT|STATE:)([^\n]+)/i
-    ]);
-
-    return {
-        U: U.substring(0, 140),
-        S: S.substring(0, 140),
-        P: P.substring(0, 220)
-    };
+    return parts;
 };
-// =============================================================================
-
-// ====================== NEW: EMBEDDING SAFETY TRUNCATION ======================
-const EMBED_MAX_TOKENS = 35000; // qwen3-embedding:8b = 40k → we keep safe headroom
 
 const truncateForEmbedding = (messagesArray) => {
     let truncated = [...messagesArray];
@@ -131,7 +110,6 @@ const truncateForEmbedding = (messagesArray) => {
         if (estTokens <= EMBED_MAX_TOKENS) break;
 
         if (truncated.length <= 5) {
-            // final fallback: truncate the very last message
             const last = truncated[truncated.length - 1];
             if (last && last.content) {
                 const str = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
@@ -139,11 +117,10 @@ const truncateForEmbedding = (messagesArray) => {
             }
             break;
         }
-        truncated.shift(); // remove oldest message
+        truncated.shift();
     }
     return JSON.stringify(truncated);
 };
-// =============================================================================
 
 const captureThoughtChain = (messages, agentName, extraStats = {}) => {
     if (!teamThoughtChains[agentName]) teamThoughtChains[agentName] = [];
@@ -163,52 +140,96 @@ const captureThoughtChain = (messages, agentName, extraStats = {}) => {
     teamThoughtChains[agentName].push({ ...stats, thoughts: [...messages] });
 };
 
+const stripEventIds = (messagesArray) => {
+    return messagesArray.map(msg => {
+        if (msg && typeof msg === 'object' && !Array.isArray(msg)) {
+            const { eventId, ...cleanMsg } = msg;
+            return cleanMsg;
+        }
+        return msg;
+    });
+};
+
 const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxManager) => {
     const summaryContext = ctxManager.getContextMessages(messages);
+    const modelSummaryContext = stripEventIds(summaryContext);
 
     console.log(`\n🧐 [${agentName} MULTI-LAYER SANITY CHECK]`);
     console.log('─'.repeat(110));
-    console.log(`\x1b[90m[FOCUSED CONTEXT]\x1b[0m ${summaryContext.length} msgs (~${ctxManager.estimateTokens(summaryContext)} tokens)`);
+    console.log(`\x1b[90m[CTX HEALTH]\x1b[0m ${modelSummaryContext.length} msgs (~${ctxManager.estimateTokens(modelSummaryContext)}t)`);
 
-    // 1. TWO DIFFERENT STYLES — PAST ONLY, COMPACT CONTEXT PROTOCOL
     const denseConfig = {
         model: agentsConfig[agentName].model,
-        messages: [{
-            role: 'system',
-            content: `PROTOCOL: createCompactPastSummary STYLE1 → ONLY past events. MAX density. /no_think /no_future /no_suggestions
-Output EXACTLY in Context Protocol language with memory labels.
-Format:
-MEM:U: [one-line past user intent]
-MEM:S: [system state]
-MEM:P: [playbook + key events compact]
-No extra text, no newlines beyond labels, no next steps, no suggestions.`
-        }, {
-            role: 'user',
-            content: `You are ${agentName}. Compact past-summary of full conversation:\n${JSON.stringify(summaryContext)}`
-        }],
+        messages: [
+            {
+                role: 'system',
+                content: `
+                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
+
+                    PROTOCOL: create_compact_past_summary → ONLY summarize past events. MAX density.
+                    - Maximize information density per token
+                    - Use shortest possible phrases and atomic facts
+                    - Prioritize critical state changes, entities, and recency
+                    - Eliminate all redundancy and narrative fluff
+
+                    Format: [MEM:U: <user intent>][MEM:S: <system state>][MEM:P: <key events>][MEM:T: <key topics + entities>]
+                    Output: EXACTLY in protocol format. Max 1.
+
+                    No extra text, no newlines, no artifacts.
+                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
+                `
+            },
+            
+            {
+                role: 'user',
+                content: `
+                    You are ${agentName}.
+                    
+                    Strictly follow create_compact_past_summary protocol and summarize this:
+                    ${JSON.stringify(modelSummaryContext)}
+                `
+            }
+        ],
         think: false,
         stream: true,
-        options: { ...agentsConfig[agentName].options, num_predict: 512 }
+        options: { ...agentsConfig[agentName].options, num_predict: 256 }
     };
 
     const trajectoryConfig = {
         model: agentsConfig[agentName].model,
-        messages: [{
-            role: 'system',
-            content: `PROTOCOL: createCompactPastSummary STYLE2 → ONLY past events. MAX density. /no_think /no_future /no_suggestions
-Output as labeled memory chain (different style from STYLE1).
-Format:
-MEM:EVENT1: ...
-MEM:EVENT2: ...
-MEM:STATE: [current playbook state]
-Minimal newlines, compact protocol language. Only past.`
-        }, {
-            role: 'user',
-            content: `You are ${agentName}. Compact past-summary of full conversation:\n${JSON.stringify(summaryContext)}`
-        }],
+        messages: [
+            {
+                role: 'system',
+                content: `
+                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
+
+                    PROTOCOL: create_compact_past_summary → ONLY summarize past events. MAX density.
+                    - Capture the causal chain and narrative flow
+                    - Highlight sequence of events, evolving intent, and decision points
+                    - Show how user intent and system state changed over time
+                    - Keep chronological coherence while staying ultra-compact
+
+                    Format: [MEM:U: <user intent>][MEM:S: <system state>][MEM:P: <key events>][MEM:T: <key topics + entities>]
+                    Output: EXACTLY in protocol format. Max 1.
+
+                    No extra text, no newlines, no artifacts.
+                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
+                `
+            },
+            
+            {
+                role: 'user',
+                content: `
+                    You are ${agentName}.
+                    
+                    Strictly follow create_compact_past_summary protocol and summarize this:
+                    ${JSON.stringify(modelSummaryContext)}
+                `
+            }
+        ],
         think: false,
         stream: true,
-        options: { ...agentsConfig[agentName].options, num_predict: 512 }
+        options: { ...agentsConfig[agentName].options, num_predict: 256 }
     };
 
     const [denseSummaryStream, trajectorySummaryStream] = await Promise.all([
@@ -230,20 +251,17 @@ Minimal newlines, compact protocol language. Only past.`
         if (content) { process.stdout.write(content); trajectorySummary += content; }
     }
 
-    // 2. ADVANCED RELIABILITY CHECK — WITH EMBEDDING SAFETY TRUNCATION
     console.log('\n\n\x1b[90m[EMBEDDING + REGEX RELIABILITY GATE]\x1b[0m');
-    const embedModel = 'qwen3-embedding';
 
-    // === SAFETY TOKEN LIMIT ===
-    let convText = JSON.stringify(summaryContext);
-    const estTokens = Math.ceil(summaryContext.reduce((acc, msg) => {
+    let convText = JSON.stringify(modelSummaryContext);
+    const estTokens = Math.ceil(modelSummaryContext.reduce((acc, msg) => {
         let content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || {});
         return acc + (content.length / 3.7);
     }, 0));
 
     if (estTokens > EMBED_MAX_TOKENS) {
         console.log(`\x1b[33m[EMBED TRUNCATION]\x1b[0m Full context ~${estTokens}t > ${EMBED_MAX_TOKENS}. Using LAST PART only.`);
-        convText = truncateForEmbedding(summaryContext);
+        convText = truncateForEmbedding(modelSummaryContext);
     }
 
     const [convEmbedding, denseEmbedding, trajEmbedding] = await Promise.all([
@@ -273,38 +291,47 @@ Minimal newlines, compact protocol language. Only past.`
     console.log(`Keyword Jaccard → Dense: ${(jaccDense*100).toFixed(1)}% | Traj: ${(jaccTraj*100).toFixed(1)}%`);
     console.log(`→ Reliability Scores: Dense ${reliabilityDense}% | Traj ${reliabilityTraj}%`);
 
-    // 3. OBJECTIVELY SELECT THE BEST SUMMARY
     const bestSummary = reliabilityDense >= reliabilityTraj ? denseSummary : trajectorySummary;
     const bestType = reliabilityDense >= reliabilityTraj ? 'dense' : 'trajectory';
     const bestReliability = Math.max(reliabilityDense, reliabilityTraj);
 
     console.log(`\n\x1b[90m[OBJECTIVE WINNER]\x1b[0m ${bestType.toUpperCase()} (${bestReliability}%) will be used for final anchor content`);
 
-    // 4. VERIFICATION LAYER (unchanged)
     const verificationStream = await withRetry(async () => ollama.chat({
         model: agentsConfig[agentName].model,
-        messages: [{
-            role: 'system',
-            content: `PROTOCOL: verifyAndConsolidate → ONLY JSON. /no_think
-Use the objective reliability metrics + conversation.
-Output EXACTLY:
-{"trust_score":0-100,"consistency_between_summaries":0-100,"notes":[max3 short]}
-Do NOT output final_recommended_anchor.`
-        }, {
-            role: 'user',
-            content: `Dense:${denseSummary}
-Trajectory:${trajectorySummary}
-BestSummary (objective winner):${bestSummary}
-Conv:${JSON.stringify(summaryContext)}
-RELIABILITY METRICS:
-SemanticSimDense:${simDense.toFixed(3)} Traj:${simTraj.toFixed(3)} Self:${simSelf.toFixed(3)}
-KeywordJaccardDense:${jaccDense.toFixed(3)} Traj:${jaccTraj.toFixed(3)}
-ReliabilityDense:${reliabilityDense} ReliabilityTraj:${reliabilityTraj}`
-        }],
+        messages: [
+            {
+                role: 'system',
+                content: `
+                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
+
+                    PROTOCOL: verifyAndConsolidate → ONLY JSON.
+                    Format: {"trust_score":0-100,"consistency_between_summaries":0-100,"notes":[max3 short]}
+                    Output: EXACTLY in protocol format. Max 1.
+
+                    No extra text, no newlines, no artifacts.
+                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
+                `
+            }, 
+            
+            {
+                role: 'user',
+                content: `
+                    Dense:${denseSummary}
+                    Trajectory:${trajectorySummary}
+                    BestSummary (objective winner):${bestSummary}
+                    Conv:${JSON.stringify(modelSummaryContext)}
+                    RELIABILITY METRICS:
+                    SemanticSimDense:${simDense.toFixed(3)} Traj:${simTraj.toFixed(3)} Self:${simSelf.toFixed(3)}
+                    KeywordJaccardDense:${jaccDense.toFixed(3)} Traj:${jaccTraj.toFixed(3)}
+                    ReliabilityDense:${reliabilityDense} ReliabilityTraj:${reliabilityTraj}  
+                `
+            }
+        ],
         think: false,
         stream: true,
         format: 'json',
-        options: { ...agentsConfig[agentName].options, num_predict: 512 }
+        options: { ...agentsConfig[agentName].options, num_predict: 256 }
     }));
 
     let verificationJson = '';
@@ -324,30 +351,30 @@ ReliabilityDense:${reliabilityDense} ReliabilityTraj:${reliabilityTraj}`
         console.warn('\x1b[33m[VERIFY FALLBACK]\x1b[0m');
     }
 
-    // 5. FINAL ANCHOR CONTENT
-    const { U, S, P } = extractProtocolParts(bestSummary);
-
     const prunedMessages = ctxManager.getContextMessages(messages);
 
-    if (trustScore >= 75 && consistency >= 50 && bestReliability >= 50) {
-        ctxManager.addAnchor(bestSummary, Math.min(trustScore, bestReliability), bestType);
+    const { U, S, P, T } = extractProtocolParts(bestSummary);
+    const anchorTrustScore = Number(((trustScore + consistency + bestReliability) / 3).toFixed(3));
 
-        const finalInjection = `[CTX ANCHOR T${trustScore}R${bestReliability}C${consistency}] U:${U} S:${S} P:${P} [${bestType.toUpperCase()}]`;
-        console.log(`\n\x1b[90m[ANCHOR CREATED]\x1b[0m ${finalInjection}`);
+    if (anchorTrustScore >= 50) {
+        const anchorId = ctxManager.addAnchor(bestSummary, Math.min(trustScore, bestReliability), bestType);
+
+        // To-do later: inject anchor into messages as system message
+
+        const finalInjection = `[CTX_ANC_${anchorId}]=[U:${U}][S:${S}][P:${P}][T:${T}]`;
+        console.log(`\n\n\x1b[90m[ANCHOR CREATED]\x1b[0m ${finalInjection}`);
     } else {
-        console.log(`\n\x1b[90m[ANCHOR SKIPPED]\x1b[0m Verification failed — keeping more raw turns instead`);
+        console.log(`\n\n\x1b[90m[ANCHOR SKIPPED]\x1b[0m Verification failed — keeping more raw turns instead`);
     }
 
     console.log(`\n\x1b[90m[CTX HEALTH]\x1b[0m ${agentName} ~${ctxManager.estimateTokens(prunedMessages)}t`);
     console.log('─'.repeat(110));
 
-    return {
-        messagesForNextTurn: prunedMessages
-    };
+    return prunedMessages;
 };
 
-const runAgent = async (agentName, userPrompt, toolHeader) => {
-    const ctxManager = new ContextManager(agentName);
+const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
+    const ctxManager = new ContextManager(agentName, userAlias);
 
     const selectedConfig = agentsConfig[agentName];
 
@@ -371,13 +398,13 @@ const runAgent = async (agentName, userPrompt, toolHeader) => {
         const result = await withRetry(async () => ollama.chat({
             model: agentsConfig[agentName].model,
             options: agentsConfig[agentName].options,
-            messages: iteration === 1 ? startingContext : messages,
+            messages: stripEventIds(iteration === 1 ? startingContext : messages),
             tools: agentTools,
             think: true,
             stream: true
         }));
 
-        const assistantMessage = { role: 'assistant', content: '', thinking: '', tool_calls: [] };
+        const assistantMessage = { role: 'assistant', name: agentName, eventId: '', content: '', thinking: '', tool_calls: [] };
         let inThinking = false, inContent = false;
 
         for await (const chunk of result) {
@@ -415,20 +442,22 @@ const runAgent = async (agentName, userPrompt, toolHeader) => {
                 const handler = getToolHandler(functionName, toolRegistry);
                 if (handler) {
                     const toolResult = await handler(args, { agentName, chatroom });
-                    messages.push({ role: 'tool', eventId: crypto.randomUUID(), name: functionName, content: JSON.stringify(toolResult) });
+                    messages.push({ role: 'tool', name: functionName, eventId: crypto.randomUUID(), content: JSON.stringify(toolResult) });
                 } else {
                     console.warn(`⚠️ No handler ${functionName}`);
                 }
             }
 
-            // const contextUpdate = await streamMultiLayerVerifiedContextUpdate(agentName, messages, ctxManager);
-            // messages = contextUpdate.messagesForNextTurn;
-            messages = ctxManager.getContextMessages(messages);
+            const contextUpdate = await streamMultiLayerVerifiedContextUpdate(agentName, messages, ctxManager);
+            messages = contextUpdate;
 
             continue;
         }
 
         if (assistantMessage.content?.trim()) {
+            console.log(ctxManager.getContextMessages(messages))
+            process.exit()
+
             captureThoughtChain(messages, agentName, { iteration, finalType: 'content' });
             return { content: assistantMessage.content.trim(), messages };
         }
@@ -472,7 +501,8 @@ export const startConversation = async (userPrompt, userAlias) => {
     try {
         const leaderResult = await runAgent(
             totalLeaders[0][0], 
-            userPrompt, 
+            userPrompt,
+            userAlias,
             `The user addressing you has set their preferred alias to: ${userAlias}. Refer to them by this name.`
         );
 

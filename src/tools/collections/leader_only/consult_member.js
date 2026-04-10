@@ -43,6 +43,7 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse })
             memberResult = await runAgentFn(
                 member_name,
                 `Task from ${context.agentName}:\n${query}`,
+                context.agentName,
                 `You are being adressed by ${context.agentName}. Refer to them by this name.\nEnsure your contributions are recorded by analyzing and sending messages in the team chat.`
             );
         } catch (err) {
