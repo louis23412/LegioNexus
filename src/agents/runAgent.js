@@ -10,7 +10,9 @@ import { createToolRegistry } from '../tools/toolRegistry.js';
 import { ContextManager } from '../context/contextManager.js';
 
 let toolRegistry;
-const teamThoughtChains = {};
+
+const stateFolder = path.join(import.meta.dirname, '..', '..', 'state_data');
+if (!fs.existsSync(stateFolder)) fs.mkdirSync(stateFolder);
 
 const chatroom = new Chatroom(200);
 const inputStore = new InputStore();
@@ -122,24 +124,6 @@ const truncateForEmbedding = (messagesArray) => {
         truncated.shift();
     }
     return JSON.stringify(truncated);
-};
-
-const captureThoughtChain = (messages, agentName, extraStats = {}) => {
-    if (!teamThoughtChains[agentName]) teamThoughtChains[agentName] = [];
-    const roughTokens = Math.ceil(messages.reduce((acc, msg) => {
-        let content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || {});
-        return acc + (content.length / 3.7);
-    }, 0));
-
-    const stats = {
-        chainId: teamThoughtChains[agentName].length,
-        numMessages: messages.length,
-        roughTokens,
-        iteration: extraStats.iteration || 0,
-        finalType: extraStats.finalType || 'unknown',
-        ...extraStats
-    };
-    teamThoughtChains[agentName].push({ ...stats, thoughts: [...messages] });
 };
 
 const stripEventIds = (messagesArray) => {
@@ -450,16 +434,26 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                 const args = parseToolArguments(toolCall.function.arguments);
 
                 if (functionName === 'finalize_answer') {
-                    captureThoughtChain(messages, agentName, { iteration, finalType: 'finalize' });
                     return { content: args.final_answer || '[No answer]', explanation: args.consensus_explanation || '', finalized: true, messages };
                 }
 
                 const handler = getToolHandler(functionName, toolRegistry);
                 if (handler) {
                     const toolResult = await handler(args, { agentName, chatroom });
-                    messages.push({ role: 'tool', name: functionName, eventId: crypto.randomUUID(), content: JSON.stringify(toolResult) });
+
+                    messages.push({ 
+                        role: 'tool', 
+                        name: functionName, 
+                        eventId: crypto.randomUUID(), 
+                        content: JSON.stringify(toolResult) 
+                    });
                 } else {
-                    console.warn(`⚠️ No handler ${functionName}`);
+                    messages.push({ 
+                        role: 'system', 
+                        name: 'system-tool-error', 
+                        eventId: crypto.randomUUID(), 
+                        content: `No handler found for tool: ${functionName}. Please use show_all_tools to get the exact names of all the tools you have access to.` 
+                    });
                 }
             }
 
@@ -470,27 +464,14 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         }
 
         if (assistantMessage.content?.trim()) {
-            captureThoughtChain(messages, agentName, { iteration, finalType: 'content' });
             return { content: assistantMessage.content.trim(), messages };
         }
 
         break;
     }
 
-    captureThoughtChain(messages, agentName, { iteration, finalType: 'max_it' });
     return { content: `[${agentName}] Max iterations.`, messages };
 };
-
-const saveConversation = (cId) => {
-    const logDir = path.join(import.meta.dirname, '..', '..', 'chat_logs');
-    const filePath = path.join(logDir, `${cId}.json`);
-
-    if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
-    fs.writeFileSync(filePath, JSON.stringify({
-        thought_chains : teamThoughtChains,
-        team_chat : chatroom.dump()
-    }));
-}
 
 export const startConversation = async (userPrompt, userAlias) => {
     const start = performance.now();
@@ -525,8 +506,6 @@ export const startConversation = async (userPrompt, userAlias) => {
 
         console.log('🤖 Final answer:')
         console.log(`\x1b[32m${leaderResult.content}\x1b[0m`);
-
-        saveConversation(conversationId);
 
         const duration = ((performance.now() - start) / 1000).toFixed(2);
         console.log(`\n⏳ Total time: ${duration}s | 💾 Full team thoughts: /chat_logs/${conversationId}.json`);
