@@ -119,8 +119,8 @@ export class ContextManager {
 
         const currentAnchorHistory = historyOnlyAnchors.slice(-this.maxAnchors);
 
-        const memoryContent = `[CTX_MEM:${this.agentName} PRI:1U 2S 3A. ID route only. No halluc.] ` +
-            currentAnchorHistory.map(a => `A${a.id}(${a.trustScore}):${a.summary}...`).join(' | ');
+        const memoryContent = `[CTX_MEM:${this.agentName} PRI:1U 2S 3A. ID route only] ` +
+            currentAnchorHistory.map(a => `A${a.id}(${a.trustScore}):${a.summary}`).join('|');
         
         const memoryAwareness = { role: 'system', name: 'system-context-memory', eventId: 'SYS-MEM', content: memoryContent };
         
