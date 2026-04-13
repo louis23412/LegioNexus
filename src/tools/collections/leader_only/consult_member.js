@@ -16,7 +16,7 @@ export const definition = {
     }
 };
 
-export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse, toolRegistry }) => {
+export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse }) => {
     return async (args, context = {}) => {
         const { member_name, query } = args || {};
 
@@ -33,29 +33,19 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse, t
             return createErrorResponse(`You can not consult yourself (${context.agentName})`, 'SELF_REFF');
         }
 
-        console.log(`\n🔍 [CONSULT ${context.agentName || 'TeamLeader'} → ${member_name}]`);
+        console.log(`\n🔍 [CONSULT ${context.agentName} → ${member_name}]`);
         console.log('─'.repeat(90));
         console.log(`\x1b[33m ${query} \x1b[0m`);
         console.log('─'.repeat(90));
 
-        const memberInitialMessages = [
-            { role: 'system', content: memberConfig.system },
-            { role: 'user', content: `Task from ${context.agentName}:\n${query}`},
-            { 
-                role: 'tool', 
-                content: `
-                    You are being adressed by ${context.agentName}. Refer to them by this name. 
-                    Ensure your contributions are recorded by analyzing and sending messages in the team chat.
-                `
-            }
-        ];
-
         let memberResult;
         try {
-            const memberTools = memberConfig.tools
-                .map(toolName => toolRegistry[toolName]?.definition)
-                .filter(Boolean);
-            memberResult = await runAgentFn(member_name, memberInitialMessages, memberTools);
+            memberResult = await runAgentFn(
+                member_name,
+                `Task from ${context.agentName}:\n${query}`,
+                context.agentName,
+                `You are being adressed by ${context.agentName}. Refer to them by this name.`
+            );
         } catch (err) {
             console.error(`❌ [CONSULT ERROR] ${member_name}:`, err.message);
             return createErrorResponse(`Member ${member_name} crashed during consultation: ${err.message}`, 'MEMBER_CRASH');
