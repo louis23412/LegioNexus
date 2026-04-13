@@ -2,38 +2,43 @@ export const definition = {
     type: 'function',
     function: {
         name: 'view_chatroom',
-        description: 'Get a clean, formatted view of the chatroom.',
+        description: 'View the current messages in the team group chatroom',
         parameters: {
             type: 'object',
-            properties: {
-                topic: {
-                    type: 'string',
-                    description: 'Optional topic to filter by (default: all)'
-                },
-                limit: {
-                    type: 'number',
-                    description: 'Number of recent messages to show (default: 40)'
-                }
-            },
+            properties: {},
             required: [],
             additionalProperties: false
         },
-        version: '2.0'
+        version: '1.0'
     }
 };
 
 export const createHandler = () => {
-    return async (args, context = {}) => {
+    return async (_, context = {}) => {
         const { chatroom } = context;
-        if (!chatroom) return { status: 'error', message: 'Chatroom unavailable' };
 
-        const { topic, limit = 40 } = args || {};
-        const view = chatroom.getChatView(topic, limit);
+        const messages = chatroom.viewMessages();
 
-        return {
-            status: 'success',
-            data: { view },
-            message: `📜 Chatroom view returned (${topic || 'all topics'})`
-        };
+        if (messages.length > 0) {
+            return {
+                total_messages: messages.length,
+                messages: messages.map((m) => {
+                    const messageDate = new Date(m.timestamp);
+
+                    const formattedTime = `${messageDate.toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric'
+                    })} ${messageDate.toLocaleTimeString('en-US', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false
+                    })}`;
+
+                    return `[MSG_${m.id} - ${formattedTime} => @${m.speaker} : ${m.content}]`;
+                }).join('')
+            };
+        }
+
+        return { total_messages: 0, messages: null };
     };
 };

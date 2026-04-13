@@ -1,11 +1,18 @@
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+
 export class ContextManager {
-    constructor(agentName, master, maxRecentTurns = 15, maxAnchors = 5) {
+    constructor(agentName, master, conversationFolder, maxRecentTurns = 15, maxAnchors = 5) {
         this.agentName = agentName;
         this.master = master;
+
         this.maxRecentTurns = maxRecentTurns;
         this.maxAnchors = maxAnchors;
+
         this.anchorSeq = 0;
         this.anchors = [];
+
         this.systemDirectives = {};
         this.pinnedUserIntent = {};
         this.pinnedToolHeader = {};
@@ -16,6 +23,59 @@ export class ContextManager {
             eventId : 'sys-clarity-reminder',
             content : 'CLARITY: MAX internal density. Anchor refs by ID only. Accuracy > speed. No fluff.'
         };
+
+        const anchorsFolder = path.join(conversationFolder, 'anchors');
+        if (!fs.existsSync(anchorsFolder)) fs.mkdirSync(anchorsFolder);
+
+        this.anchorsFile = path.join(anchorsFolder, `${agentName}.json`);
+
+        const contextFolder = path.join(conversationFolder, 'context');
+        if (!fs.existsSync(contextFolder)) fs.mkdirSync(contextFolder);
+
+        const agentCtxFolder = path.join(contextFolder, agentName);
+        if (!fs.existsSync(agentCtxFolder)) fs.mkdirSync(agentCtxFolder);
+
+        this.contextFolder = agentCtxFolder;
+
+        this.#loadAnchors();
+    }
+
+    #loadAnchors() {
+        try {
+            const data = fs.readFileSync(this.anchorsFile, 'utf8');
+
+            const anchorData = JSON.parse(data);
+
+            this.anchors = anchorData.anchors;
+            this.anchorSeq = anchorData.anchorSeq;
+        } 
+        catch (err) { this.anchors = []; this.anchorSeq = 0; }
+    }
+
+    #saveAnchors() {
+        const saveObj = {
+            anchorSeq : this.anchorSeq,
+            anchors : this.anchors
+        }
+
+        try { fs.writeFileSync(this.anchorsFile, JSON.stringify(saveObj, null, 2), 'utf8'); } 
+        catch (err) {}
+    }
+
+    dumpLastContext(lastMessages) {
+        const latestContext = this.getContextMessages(lastMessages);
+
+        const agentContextSpace = {
+            csId : crypto.randomUUID(),
+            tokenSize : this.estimateTokens(latestContext),
+            contextSpace : latestContext
+        }
+
+        const fileName = `${this.master}-${this.agentName}-${Date.now()}.json`;
+        const fileToWrite = path.join(this.contextFolder, fileName);
+
+        try { fs.writeFileSync(fileToWrite, JSON.stringify(agentContextSpace, null, 2), 'utf8'); } 
+        catch (err) {}
     }
 
     setCore(initialMessages) {
@@ -44,6 +104,8 @@ export class ContextManager {
         };
 
         this.anchors.push(entry);
+
+        this.#saveAnchors();
 
         return this.anchorSeq;
     }

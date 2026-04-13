@@ -11,11 +11,7 @@ const toolCollections = {
 
     chat_tools: [
         'view_chatroom',
-        'send_chat_message',
-        'delete_chat_message',
-        'react_to_message',
-        'search_chat_messages',
-        'create_topic'
+        'send_chat_message'
     ],
 
     input_tools : [

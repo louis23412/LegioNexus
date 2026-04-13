@@ -9,17 +9,18 @@ import { createAgentsConfig } from '../agents/agents.js';
 import { createToolRegistry } from '../tools/toolRegistry.js';
 import { ContextManager } from '../context/contextManager.js';
 
+let chatroom;
 let toolRegistry;
+let conversationFolder;
 
-const stateFolder = path.join(import.meta.dirname, '..', '..', 'state_data');
-if (!fs.existsSync(stateFolder)) fs.mkdirSync(stateFolder);
-
-const chatroom = new Chatroom(200);
 const inputStore = new InputStore();
 const agentsConfig = createAgentsConfig();
 
 const EMBED_MAX_TOKENS = 35000;
 const embedModel = 'qwen3-embedding';
+
+const stateFolder = path.join(import.meta.dirname, '..', '..', 'state_data');
+if (!fs.existsSync(stateFolder)) fs.mkdirSync(stateFolder);
 
 const getToolHandler = (toolName, registry) => registry[toolName]?.handler || null;
 
@@ -136,7 +137,7 @@ const stripEventIds = (messagesArray) => {
     });
 };
 
-const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxManager) => {
+const getCtxUpdate = async (agentName, messages, ctxManager) => {
     const summaryContext = ctxManager.getContextMessages(messages);
     const modelSummaryContext = stripEventIds(summaryContext);
 
@@ -373,7 +374,7 @@ const streamMultiLayerVerifiedContextUpdate = async (agentName, messages, ctxMan
 };
 
 const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
-    const ctxManager = new ContextManager(agentName, userAlias);
+    const ctxManager = new ContextManager(agentName, userAlias, conversationFolder);
 
     const selectedConfig = agentsConfig[agentName];
 
@@ -434,6 +435,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                 const args = parseToolArguments(toolCall.function.arguments);
 
                 if (functionName === 'finalize_answer') {
+                    ctxManager.dumpLastContext(messages);
                     return { content: args.final_answer || '[No answer]', explanation: args.consensus_explanation || '', finalized: true, messages };
                 }
 
@@ -457,29 +459,32 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                 }
             }
 
-            const contextUpdate = await streamMultiLayerVerifiedContextUpdate(agentName, messages, ctxManager);
+            const contextUpdate = await getCtxUpdate(agentName, messages, ctxManager);
             messages = contextUpdate;
 
             continue;
         }
 
         if (assistantMessage.content?.trim()) {
+            ctxManager.dumpLastContext(messages);
             return { content: assistantMessage.content.trim(), messages };
         }
 
         break;
     }
 
+    ctxManager.dumpLastContext(messages);
     return { content: `[${agentName}] Max iterations.`, messages };
 };
 
-export const startConversation = async (userPrompt, userAlias) => {
-    const start = performance.now();
-    const conversationId = (Math.random() * start).toString(36);
+export const startConversation = async (convId, userPrompt, userAlias) => {
+    const convFolder = path.join(stateFolder, `conv_${convId}`);
+    if (!fs.existsSync(convFolder)) fs.mkdirSync(convFolder);
 
+    conversationFolder = convFolder;
+
+    chatroom = new Chatroom(convFolder);
     toolRegistry = await createToolRegistry(runAgent, agentsConfig, inputStore);
-
-    chatroom.sendMessage(userAlias, userPrompt, { topic: 'general', metadata: { type: 'user_query', source: 'human' } });
 
     const totalLeaders = Object.entries(agentsConfig).filter(([_, cfg]) => cfg.isLeader);
 
@@ -488,10 +493,12 @@ export const startConversation = async (userPrompt, userAlias) => {
         process.exit(1);
     }
 
-    console.log('\n💡 [USER QUERY]');
-    console.log(`\x1b[35m${userPrompt}\x1b[0m`);
-
     try {
+        const start = performance.now();
+
+        console.log('\n💡 [USER QUERY]');
+        console.log(`\x1b[35m${userPrompt}\x1b[0m`);
+
         const leaderResult = await runAgent(
             totalLeaders[0][0], 
             userPrompt,
@@ -508,7 +515,7 @@ export const startConversation = async (userPrompt, userAlias) => {
         console.log(`\x1b[32m${leaderResult.content}\x1b[0m`);
 
         const duration = ((performance.now() - start) / 1000).toFixed(2);
-        console.log(`\n⏳ Total time: ${duration}s | 💾 Full team thoughts: /chat_logs/${conversationId}.json`);
+        console.log(`\n⏳ Total time: ${duration}s`);
         console.log('─'.repeat(90) + '\n');
 
         return { success : true };
