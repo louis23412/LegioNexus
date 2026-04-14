@@ -10,6 +10,7 @@ import { createToolRegistry } from '../tools/toolRegistry.js';
 import { ContextManager } from '../context/contextManager.js';
 
 let chatroom;
+let eventSocket;
 let toolRegistry;
 let conversationFolder;
 
@@ -21,6 +22,8 @@ const embedModel = 'qwen3-embedding';
 
 const stateFolder = path.join(import.meta.dirname, '..', '..', 'state_data');
 if (!fs.existsSync(stateFolder)) fs.mkdirSync(stateFolder);
+
+const broadcastEvent = (agentName, eventType, eventId, data) => eventSocket.emit(eventType, { agentName, eventId, data });
 
 const getToolHandler = (toolName, registry) => registry[toolName]?.handler || null;
 
@@ -38,11 +41,23 @@ const parseToolArguments = (rawArgs) => {
     return args;
 };
 
-const withRetry = async (fn, retries = 2) => {
+const withRetry = async (fn, retries = 3) => {
     for (let i = 0; i <= retries; i++) {
         try { return await fn(); } catch (err) {
-            if (i === retries) throw err;
-            console.log(`\x1b[33m[RETRY ${i+1}/${retries}] Ollama call failed\x1b[0m`);
+            if (i === retries) { 
+                broadcastEvent(null, 'ollama-calls-fail', crypto.randomUUID(), {
+                    error : err.message,
+                    retries
+                })
+
+                throw err
+            };
+
+            broadcastEvent(null, 'ollama-call-retry', crypto.randomUUID(), {
+                current_try : i + 1,
+                max_tries : retries
+            })
+
             await new Promise(r => setTimeout(r, 400 * (i + 1)));
         }
     }
@@ -73,7 +88,6 @@ const jaccardSimilarity = (setA, setB) => {
 
 const extractProtocolParts = (text) => {
     if (!text || typeof text !== 'string' || text.trim() === '') {
-        console.warn('\x1b[33m[PROTOCOL PARSER] Empty or invalid text\x1b[0m');
         return { U: '—', S: '—', P: '—', T: '—', valid: false };
     }
 
@@ -140,10 +154,6 @@ const stripEventIds = (messagesArray) => {
 const getCtxUpdate = async (agentName, messages, ctxManager) => {
     const summaryContext = ctxManager.getContextMessages(messages);
     const modelSummaryContext = stripEventIds(summaryContext);
-
-    console.log(`\n🧐 [${agentName} MULTI-LAYER SANITY CHECK]`);
-    console.log('─'.repeat(110));
-    console.log(`\x1b[90m[CTX HEALTH]\x1b[0m ${modelSummaryContext.length} msgs (~${ctxManager.estimateTokens(modelSummaryContext)}t)`);
 
     const denseConfig = {
         model: agentsConfig[agentName].model,
@@ -225,20 +235,28 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
     ]);
 
     let denseSummary = '';
-    console.log('\n\x1b[90m[DENSE LAYER — STYLE 1]\x1b[0m');
+    const denseId = crypto.randomUUID();
+
     for await (const chunk of denseSummaryStream) {
         const content = chunk.message?.content || '';
-        if (content) { process.stdout.write(content); denseSummary += content; }
+
+        if (content) { 
+            broadcastEvent(agentName, 'sanity-check-1', denseId, content);
+            denseSummary += content;
+        }
     }
 
     let trajectorySummary = '';
-    console.log('\n\n\x1b[90m[TRAJECTORY LAYER — STYLE 2]\x1b[0m');
+    const trajId = crypto.randomUUID();
+
     for await (const chunk of trajectorySummaryStream) {
         const content = chunk.message?.content || '';
-        if (content) { process.stdout.write(content); trajectorySummary += content; }
-    }
 
-    console.log('\n\n\x1b[90m[EMBEDDING + REGEX RELIABILITY GATE]\x1b[0m');
+        if (content) {
+            broadcastEvent(agentName, 'sanity-check-2', trajId, content);
+            trajectorySummary += content; 
+        }
+    }
 
     let convText = JSON.stringify(modelSummaryContext);
     const estTokens = Math.ceil(modelSummaryContext.reduce((acc, msg) => {
@@ -246,15 +264,12 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         return acc + (content.length / 3.7);
     }, 0));
 
-    if (estTokens > EMBED_MAX_TOKENS) {
-        console.log(`\x1b[33m[EMBED TRUNCATION]\x1b[0m Full context ~${estTokens}t > ${EMBED_MAX_TOKENS}. Using LAST PART only.`);
-        convText = truncateForEmbedding(modelSummaryContext);
-    }
+    if (estTokens > EMBED_MAX_TOKENS) { convText = truncateForEmbedding(modelSummaryContext) };
 
     const [convEmbedding, denseEmbedding, trajEmbedding] = await Promise.all([
-        withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: convText })).embedding, 1),
-        withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: denseSummary })).embedding, 1),
-        withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: trajectorySummary })).embedding, 1)
+        withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: convText })).embedding),
+        withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: denseSummary })).embedding),
+        withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: trajectorySummary })).embedding)
     ]).catch(() => [[], [], []]);
 
     let simDense = 0, simTraj = 0, simSelf = 0;
@@ -274,15 +289,15 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
     const reliabilityDense = Math.round((simDense * 0.7 + jaccDense * 0.3) * 100);
     const reliabilityTraj = Math.round((simTraj * 0.7 + jaccTraj * 0.3) * 100);
 
-    console.log(`Semantic Sim → Dense: ${(simDense*100).toFixed(1)}% | Traj: ${(simTraj*100).toFixed(1)}% | Self: ${(simSelf*100).toFixed(1)}%`);
-    console.log(`Keyword Jaccard → Dense: ${(jaccDense*100).toFixed(1)}% | Traj: ${(jaccTraj*100).toFixed(1)}%`);
-    console.log(`→ Reliability Scores: Dense ${reliabilityDense}% | Traj ${reliabilityTraj}%`);
+    broadcastEvent(agentName, 'sanity-gate', crypto.randomUUID(), {
+        semantic_similarity : { layer1 : simDense * 100, layer2: simTraj * 100, cross_layer: simSelf * 100 },
+        keyword_similarity : { layer1 : jaccDense * 100, layer2 : jaccTraj * 100 },
+        reliability_score : { layer1 : reliabilityDense, layer2 : reliabilityTraj }
+    });
 
     const bestSummary = reliabilityDense >= reliabilityTraj ? denseSummary : trajectorySummary;
     const bestType = reliabilityDense >= reliabilityTraj ? 'dense' : 'trajectory';
     const bestReliability = Math.max(reliabilityDense, reliabilityTraj);
-
-    console.log(`\n\x1b[90m[OBJECTIVE WINNER]\x1b[0m ${bestType.toUpperCase()} (${bestReliability}%) will be used for final anchor content`);
 
     const verificationStream = await withRetry(async () => ollama.chat({
         model: agentsConfig[agentName].model,
@@ -337,10 +352,15 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
     }));
 
     let verificationJson = '';
-    console.log('\n\x1b[90m[VERIFY LAYER — SCORES ONLY]\x1b[0m');
+    const verifyId = crypto.randomUUID();
+
     for await (const chunk of verificationStream) {
         const content = chunk.message?.content || '';
-        if (content) { process.stdout.write(content); verificationJson += content; }
+
+        if (content) {
+            broadcastEvent(agentName, 'sanity-verify', verifyId, content)
+            verificationJson += content; 
+        }
     }
 
     let trustScore = 50, consistency = 50;
@@ -362,13 +382,10 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         prunedMessages.push({role: 'system', name: 'system-context-anchor', eventId: `ctx-${anchorId}`, content:finalInjection});
         prunedMessages = ctxManager.getContextMessages(prunedMessages);
 
-        console.log(`\n\n\x1b[90m[ANCHOR CREATED]\x1b[0m ${finalInjection}`);
+        broadcastEvent(agentName, 'anchor-create', crypto.randomUUID(), { anchorId, U, S, P, T });
     } else {
-        console.log(`\n\n\x1b[90m[ANCHOR SKIPPED]\x1b[0m Verification failed — keeping more raw turns instead`);
+        broadcastEvent(agentName, 'anchor-skip', crypto.randomUUID(), null);
     }
-
-    console.log(`\n\x1b[90m[CTX HEALTH]\x1b[0m ${agentName} ~${ctxManager.estimateTokens(prunedMessages)}t`);
-    console.log('─'.repeat(110));
 
     return prunedMessages;
 };
@@ -404,35 +421,48 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
             stream: true
         }));
 
-        const assistantMessage = { role: 'assistant', name: agentName, eventId: '', content: '', thinking: '', tool_calls: [] };
-        let inThinking = false, inContent = false;
+        const assistantMessage = { 
+            role: 'assistant', 
+            name: agentName, 
+            eventId: crypto.randomUUID(), 
+            content: '', 
+            thinking: '', 
+            tool_calls: [] 
+        };
+
+        const thinkId = crypto.randomUUID();
+        const contentId = crypto.randomUUID();
 
         for await (const chunk of result) {
             const msg = chunk.message || {};
+
             if (msg.thinking) {
-                if (!inThinking) { inThinking = true; console.log(`\n🧠 [${agentName} THINK]`); }
-                process.stdout.write('\x1b[34m' + msg.thinking + '\x1b[0m');
+                broadcastEvent(agentName, 'think', thinkId, msg.thinking);
                 assistantMessage.thinking += msg.thinking;
             }
+
             if (msg.content) {
-                if (!inContent) { inContent = true; console.log(`\n💬 [${agentName} RESP]`); }
-                process.stdout.write('\x1b[36m' + msg.content + '\x1b[0m');
+                broadcastEvent(agentName, 'content', contentId, msg.content);
                 assistantMessage.content += msg.content;
             }
+
             if (msg.tool_calls?.length > 0) assistantMessage.tool_calls.push(...msg.tool_calls);
         }
 
-        console.log('\n' + '─'.repeat(110));
-
-        assistantMessage.eventId = crypto.randomUUID();
         messages.push(assistantMessage);
 
         if (assistantMessage.tool_calls?.length > 0) {
             for (const toolCall of assistantMessage.tool_calls) {
                 const functionName = toolCall.function.name;
-                console.log(`\n🔧 [${agentName} TOOL ${functionName}]`);
 
                 const args = parseToolArguments(toolCall.function.arguments);
+
+                broadcastEvent( agentName, 'call-tool', crypto.randomUUID(),
+                    {
+                        function_name : functionName,
+                        arguments : args
+                    }
+                )
 
                 if (functionName === 'finalize_answer') {
                     ctxManager.dumpLastContext(messages);
@@ -449,6 +479,8 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                         eventId: crypto.randomUUID(), 
                         content: JSON.stringify(toolResult) 
                     });
+
+                    broadcastEvent(agentName, 'tool-result', crypto.randomUUID(), toolResult);
                 } else {
                     messages.push({ 
                         role: 'system', 
@@ -456,6 +488,8 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                         eventId: crypto.randomUUID(), 
                         content: `No handler found for tool: ${functionName}. Please use show_all_tools to get the exact names of all the tools you have access to.` 
                     });
+
+                    broadcastEvent(agentName, 'no-tool-handler', crypto.randomUUID(), functionName);
                 }
             }
 
@@ -477,9 +511,11 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
     return { content: `[${agentName}] Max iterations.`, messages };
 };
 
-export const startConversation = async (convId, userPrompt, userAlias) => {
+export const startConversation = async (convId, userPrompt, userAlias, eSckt) => {
     const convFolder = path.join(stateFolder, `conv_${convId}`);
     if (!fs.existsSync(convFolder)) fs.mkdirSync(convFolder);
+
+    eventSocket = eSckt;
 
     conversationFolder = convFolder;
 
@@ -488,16 +524,12 @@ export const startConversation = async (convId, userPrompt, userAlias) => {
 
     const totalLeaders = Object.entries(agentsConfig).filter(([_, cfg]) => cfg.isLeader);
 
-    if (totalLeaders.length !== 1) {
-        console.log(`❌ Exactly one leader needed. Found: ${totalLeaders.length}`);
-        process.exit(1);
-    }
+    if (totalLeaders.length !== 1) throw new Error(`Exactly one leader needed. Found: ${totalLeaders.length}`);
 
     try {
         const start = performance.now();
 
-        console.log('\n💡 [USER QUERY]');
-        console.log(`\x1b[35m${userPrompt}\x1b[0m`);
+        broadcastEvent(null, 'user-prompt', crypto.randomUUID(), userPrompt);
 
         const leaderResult = await runAgent(
             totalLeaders[0][0], 
@@ -506,18 +538,18 @@ export const startConversation = async (convId, userPrompt, userAlias) => {
             `The user addressing you has set their preferred alias to: ${userAlias}. Refer to them by this name.`
         );
 
-        console.log('\n🏆 [FINAL TEAM ANSWER]');
-        console.log('─'.repeat(90));
-
-        if (leaderResult.explanation) console.log(`📋 Consensus explanation:\n\x1b[33m${leaderResult.explanation}\x1b[0m\n`);
-
-        console.log('🤖 Final answer:')
-        console.log(`\x1b[32m${leaderResult.content}\x1b[0m`);
-
         const duration = ((performance.now() - start) / 1000).toFixed(2);
-        console.log(`\n⏳ Total time: ${duration}s`);
-        console.log('─'.repeat(90) + '\n');
+
+        broadcastEvent(null, 'final-answer', crypto.randomUUID(),
+            {
+                explanation : leaderResult.explanation,
+                final_answer : leaderResult.content,
+                runtime : duration
+            }
+        )
 
         return { success : true };
-    } catch (error) { return { success : false, error } }
+    }
+    
+    catch (error) { return { success : false, error } }
 };
