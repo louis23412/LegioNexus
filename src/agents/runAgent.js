@@ -41,6 +41,12 @@ const parseToolArguments = (rawArgs) => {
     return args;
 };
 
+const checkAbort = (signal) => {
+    if (signal?.aborted) {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+    }
+};
+
 const withRetry = async (fn, retries = 3) => {
     for (let i = 0; i <= retries; i++) {
         try { return await fn(); } catch (err) {
@@ -49,7 +55,6 @@ const withRetry = async (fn, retries = 3) => {
                     error : err.message,
                     retries
                 })
-
                 throw err
             };
 
@@ -151,7 +156,7 @@ const stripEventIds = (messagesArray) => {
     });
 };
 
-const getCtxUpdate = async (agentName, messages, ctxManager) => {
+const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
     const summaryContext = ctxManager.getContextMessages(messages);
     const modelSummaryContext = stripEventIds(summaryContext);
 
@@ -229,34 +234,31 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         options: { ...agentsConfig[agentName].options, num_predict: 256 }
     };
 
-    const [denseSummaryStream, trajectorySummaryStream] = await Promise.all([
-        withRetry(async () => ollama.chat(denseConfig)),
-        withRetry(async () => ollama.chat(trajectoryConfig))
-    ]);
-
+    const denseSummaryStream = await withRetry(async () => ollama.chat(denseConfig));
     let denseSummary = '';
     const denseId = crypto.randomUUID();
-
     for await (const chunk of denseSummaryStream) {
+        checkAbort(signal);
         const content = chunk.message?.content || '';
-
         if (content) { 
             broadcastEvent(agentName, 'sanity-check-1', denseId, content);
             denseSummary += content;
         }
     }
 
+    const trajectorySummaryStream = await withRetry(async () => ollama.chat(trajectoryConfig));
     let trajectorySummary = '';
     const trajId = crypto.randomUUID();
-
     for await (const chunk of trajectorySummaryStream) {
+        checkAbort(signal);
         const content = chunk.message?.content || '';
-
         if (content) {
             broadcastEvent(agentName, 'sanity-check-2', trajId, content);
             trajectorySummary += content; 
         }
     }
+
+    checkAbort(signal);
 
     let convText = JSON.stringify(modelSummaryContext);
     const estTokens = Math.ceil(modelSummaryContext.reduce((acc, msg) => {
@@ -266,28 +268,28 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
 
     if (estTokens > EMBED_MAX_TOKENS) { convText = truncateForEmbedding(modelSummaryContext) };
 
-    const [convEmbedding, denseEmbedding, trajEmbedding] = await Promise.all([
-        withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: convText })).embedding),
-        withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: denseSummary })).embedding),
-        withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: trajectorySummary })).embedding)
-    ]).catch(() => [[], [], []]);
-
-    let simDense = 0, simTraj = 0, simSelf = 0;
-    if (convEmbedding.length) {
-        simDense = cosineSimilarity(denseEmbedding, convEmbedding);
-        simTraj = cosineSimilarity(trajEmbedding, convEmbedding);
-        simSelf = cosineSimilarity(denseEmbedding, trajEmbedding);
-    }
+    const convEmbedding = await withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: convText })).embedding);
+    checkAbort(signal);
 
     const kwConv = new Set(extractKeywords(convText));
+
+    const denseEmbedding = await withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: denseSummary })).embedding);
+    checkAbort(signal);
+
+    const simDense = convEmbedding.length ? cosineSimilarity(denseEmbedding, convEmbedding) : 0;
     const kwDense = new Set(extractKeywords(denseSummary));
-    const kwTraj = new Set(extractKeywords(trajectorySummary));
-
     const jaccDense = jaccardSimilarity(kwConv, kwDense);
-    const jaccTraj = jaccardSimilarity(kwConv, kwTraj);
-
     const reliabilityDense = Math.round((simDense * 0.7 + jaccDense * 0.3) * 100);
+
+    const trajEmbedding = await withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: trajectorySummary })).embedding);
+    checkAbort(signal);
+
+    const simTraj = convEmbedding.length ? cosineSimilarity(trajEmbedding, convEmbedding) : 0;
+    const kwTraj = new Set(extractKeywords(trajectorySummary));
+    const jaccTraj = jaccardSimilarity(kwConv, kwTraj);
     const reliabilityTraj = Math.round((simTraj * 0.7 + jaccTraj * 0.3) * 100);
+
+    const simSelf = convEmbedding.length ? cosineSimilarity(denseEmbedding, trajEmbedding) : 0;
 
     broadcastEvent(agentName, 'sanity-gate', crypto.randomUUID(), {
         semantic_similarity : { layer1 : simDense * 100, layer2: simTraj * 100, cross_layer: simSelf * 100 },
@@ -355,13 +357,15 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
     const verifyId = crypto.randomUUID();
 
     for await (const chunk of verificationStream) {
+        checkAbort(signal);
         const content = chunk.message?.content || '';
-
         if (content) {
-            broadcastEvent(agentName, 'sanity-verify', verifyId, content)
+            broadcastEvent(agentName, 'sanity-verify', verifyId, content);
             verificationJson += content; 
         }
     }
+
+    checkAbort(signal);
 
     let trustScore = 50, consistency = 50;
     try {
@@ -390,7 +394,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
     return prunedMessages;
 };
 
-const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
+const runAgent = async (agentName, userPrompt, userAlias, toolHeader, signal) => {
     const ctxManager = new ContextManager(agentName, userAlias, conversationFolder);
 
     const selectedConfig = agentsConfig[agentName];
@@ -411,6 +415,8 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
     const startingContext = ctxManager.getContextMessages(messages);
 
     while (iteration < agentsConfig[agentName].maxIterations) {
+        checkAbort(signal);
+
         iteration++;
         const result = await withRetry(async () => ollama.chat({
             model: agentsConfig[agentName].model,
@@ -434,6 +440,8 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         const contentId = crypto.randomUUID();
 
         for await (const chunk of result) {
+            checkAbort(signal);
+
             const msg = chunk.message || {};
 
             if (msg.thinking) {
@@ -454,15 +462,12 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         if (assistantMessage.tool_calls?.length > 0) {
             for (const toolCall of assistantMessage.tool_calls) {
                 const functionName = toolCall.function.name;
-
                 const args = parseToolArguments(toolCall.function.arguments);
 
-                broadcastEvent( agentName, 'call-tool', crypto.randomUUID(),
-                    {
-                        function_name : functionName,
-                        arguments : args
-                    }
-                )
+                broadcastEvent(agentName, 'call-tool', crypto.randomUUID(), {
+                    function_name : functionName,
+                    arguments : args
+                });
 
                 if (functionName === 'finalize_answer') {
                     ctxManager.dumpLastContext(messages);
@@ -472,14 +477,12 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                 const handler = getToolHandler(functionName, toolRegistry);
                 if (handler) {
                     const toolResult = await handler(args, { agentName, chatroom });
-
                     messages.push({ 
                         role: 'tool', 
                         name: functionName, 
                         eventId: crypto.randomUUID(), 
                         content: JSON.stringify(toolResult) 
                     });
-
                     broadcastEvent(agentName, 'tool-result', crypto.randomUUID(), toolResult);
                 } else {
                     messages.push({ 
@@ -488,12 +491,12 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                         eventId: crypto.randomUUID(), 
                         content: `No handler found for tool: ${functionName}. Please use show_all_tools to get the exact names of all the tools you have access to.` 
                     });
-
                     broadcastEvent(agentName, 'no-tool-handler', crypto.randomUUID(), functionName);
                 }
             }
 
-            const contextUpdate = await getCtxUpdate(agentName, messages, ctxManager);
+            checkAbort(signal);
+            const contextUpdate = await getCtxUpdate(agentName, messages, ctxManager, signal);
             messages = contextUpdate;
 
             continue;
@@ -511,12 +514,11 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
     return { content: `[${agentName}] Max iterations.`, messages };
 };
 
-export const startConversation = async (convId, userPrompt, userAlias, eSckt) => {
+export const startConversation = async (convId, userPrompt, userAlias, eSckt, signal) => {
     const convFolder = path.join(stateFolder, `conv_${convId}`);
     if (!fs.existsSync(convFolder)) fs.mkdirSync(convFolder);
 
     eventSocket = eSckt;
-
     conversationFolder = convFolder;
 
     chatroom = new Chatroom(convFolder);
@@ -535,21 +537,25 @@ export const startConversation = async (convId, userPrompt, userAlias, eSckt) =>
             totalLeaders[0][0], 
             userPrompt,
             userAlias,
-            `The user addressing you has set their preferred alias to: ${userAlias}. Refer to them by this name.`
+            `The user addressing you has set their preferred alias to: ${userAlias}. Refer to them by this name.`,
+            signal
         );
 
         const duration = ((performance.now() - start) / 1000).toFixed(2);
 
-        broadcastEvent(null, 'final-answer', crypto.randomUUID(),
-            {
-                explanation : leaderResult.explanation,
-                final_answer : leaderResult.content,
-                runtime : duration
-            }
-        )
+        broadcastEvent(null, 'final-answer', crypto.randomUUID(), {
+            explanation : leaderResult.explanation,
+            final_answer : leaderResult.content,
+            runtime : duration
+        });
 
         return { success : true };
     }
-    
-    catch (error) { return { success : false, error } }
+    catch (error) { 
+        if (error.name === 'AbortError') {
+            console.log('🛑 Conversation aborted by user request');
+            return { success: true, aborted: true };
+        }
+        return { success : false, error } 
+    }
 };
