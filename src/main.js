@@ -47,10 +47,6 @@ const main = async () => {
     const socket = io.connect(`http://${ipAddress}:${port}/chat`, { reconnection: true });
 
     socket.on('start-conversation', async (data) => {
-        console.log('start', data);
-        return;
-
-
         if (currentWorkState.isWorking) {
             console.log('🚫 busy working, cannot start another conversation');
             return;
@@ -98,10 +94,6 @@ const main = async () => {
     });
 
     socket.on('stop-conversation', (data) => {
-        console.log('stop', data);
-        return;
-
-
         if (!currentWorkState.isWorking) {
             console.log('ℹ️ No active conversation to stop');
             return;

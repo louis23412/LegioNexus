@@ -10,9 +10,11 @@ import { createToolRegistry } from '../tools/toolRegistry.js';
 import { ContextManager } from '../context/contextManager.js';
 
 let chatroom;
-let eventSocket;
 let toolRegistry;
 let conversationFolder;
+
+let eventSocket;
+let eventAbort;
 
 const inputStore = new InputStore();
 const agentsConfig = createAgentsConfig();
@@ -41,8 +43,8 @@ const parseToolArguments = (rawArgs) => {
     return args;
 };
 
-const checkAbort = (signal) => {
-    if (signal?.aborted) {
+const checkAbort = () => {
+    if (eventAbort?.aborted) {
         throw new DOMException('The operation was aborted.', 'AbortError');
     }
 };
@@ -156,7 +158,7 @@ const stripEventIds = (messagesArray) => {
     });
 };
 
-const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
+const getCtxUpdate = async (agentName, messages, ctxManager) => {
     const summaryContext = ctxManager.getContextMessages(messages);
     const modelSummaryContext = stripEventIds(summaryContext);
 
@@ -238,7 +240,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
     let denseSummary = '';
     const denseId = crypto.randomUUID();
     for await (const chunk of denseSummaryStream) {
-        checkAbort(signal);
+        checkAbort();
         const content = chunk.message?.content || '';
         if (content) { 
             broadcastEvent(agentName, 'sanity-check-1', denseId, content);
@@ -250,7 +252,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
     let trajectorySummary = '';
     const trajId = crypto.randomUUID();
     for await (const chunk of trajectorySummaryStream) {
-        checkAbort(signal);
+        checkAbort();
         const content = chunk.message?.content || '';
         if (content) {
             broadcastEvent(agentName, 'sanity-check-2', trajId, content);
@@ -258,7 +260,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
         }
     }
 
-    checkAbort(signal);
+    checkAbort();
 
     let convText = JSON.stringify(modelSummaryContext);
     const estTokens = Math.ceil(modelSummaryContext.reduce((acc, msg) => {
@@ -269,12 +271,12 @@ const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
     if (estTokens > EMBED_MAX_TOKENS) { convText = truncateForEmbedding(modelSummaryContext) };
 
     const convEmbedding = await withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: convText })).embedding);
-    checkAbort(signal);
+    checkAbort();
 
     const kwConv = new Set(extractKeywords(convText));
 
     const denseEmbedding = await withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: denseSummary })).embedding);
-    checkAbort(signal);
+    checkAbort();
 
     const simDense = convEmbedding.length ? cosineSimilarity(denseEmbedding, convEmbedding) : 0;
     const kwDense = new Set(extractKeywords(denseSummary));
@@ -282,7 +284,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
     const reliabilityDense = Math.round((simDense * 0.7 + jaccDense * 0.3) * 100);
 
     const trajEmbedding = await withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: trajectorySummary })).embedding);
-    checkAbort(signal);
+    checkAbort();
 
     const simTraj = convEmbedding.length ? cosineSimilarity(trajEmbedding, convEmbedding) : 0;
     const kwTraj = new Set(extractKeywords(trajectorySummary));
@@ -357,7 +359,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
     const verifyId = crypto.randomUUID();
 
     for await (const chunk of verificationStream) {
-        checkAbort(signal);
+        checkAbort();
         const content = chunk.message?.content || '';
         if (content) {
             broadcastEvent(agentName, 'sanity-verify', verifyId, content);
@@ -365,7 +367,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
         }
     }
 
-    checkAbort(signal);
+    checkAbort();
 
     let trustScore = 50, consistency = 50;
     try {
@@ -394,7 +396,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, signal) => {
     return prunedMessages;
 };
 
-const runAgent = async (agentName, userPrompt, userAlias, toolHeader, signal) => {
+const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
     const ctxManager = new ContextManager(agentName, userAlias, conversationFolder);
 
     const selectedConfig = agentsConfig[agentName];
@@ -415,7 +417,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader, signal) =>
     const startingContext = ctxManager.getContextMessages(messages);
 
     while (iteration < agentsConfig[agentName].maxIterations) {
-        checkAbort(signal);
+        checkAbort();
 
         iteration++;
         const result = await withRetry(async () => ollama.chat({
@@ -440,7 +442,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader, signal) =>
         const contentId = crypto.randomUUID();
 
         for await (const chunk of result) {
-            checkAbort(signal);
+            checkAbort();
 
             const msg = chunk.message || {};
 
@@ -495,8 +497,8 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader, signal) =>
                 }
             }
 
-            checkAbort(signal);
-            const contextUpdate = await getCtxUpdate(agentName, messages, ctxManager, signal);
+            checkAbort();
+            const contextUpdate = await getCtxUpdate(agentName, messages, ctxManager);
             messages = contextUpdate;
 
             continue;
@@ -519,6 +521,7 @@ export const startConversation = async (convId, userPrompt, userAlias, eSckt, si
     if (!fs.existsSync(convFolder)) fs.mkdirSync(convFolder);
 
     eventSocket = eSckt;
+    eventAbort = signal;
     conversationFolder = convFolder;
 
     chatroom = new Chatroom(convFolder);
@@ -537,8 +540,7 @@ export const startConversation = async (convId, userPrompt, userAlias, eSckt, si
             totalLeaders[0][0], 
             userPrompt,
             userAlias,
-            `The user addressing you has set their preferred alias to: ${userAlias}. Refer to them by this name.`,
-            signal
+            `The user addressing you has set their preferred alias to: ${userAlias}. Refer to them by this name.`
         );
 
         const duration = ((performance.now() - start) / 1000).toFixed(2);
