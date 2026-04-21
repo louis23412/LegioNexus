@@ -389,8 +389,6 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         consistency = Math.max(0, Math.min(100, parsed.consistency_between_summaries || 50));
     } catch (e) {}
 
-    let prunedMessages = ctxManager.getContextMessages(messages);
-
     const { U, S, P, T, valid } = extractProtocolParts(bestSummary);
     const anchorTrustScore = Number(((trustScore + consistency + bestReliability) / 3).toFixed(3));
 
@@ -398,18 +396,22 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         const anchorId = ctxManager.addAnchor(bestSummary, Math.min(trustScore, bestReliability), bestType);
         const finalInjection = `[CTX_ANC_${anchorId}]=[U:${U}][S:${S}][P:${P}][T:${T}]`;
 
-        prunedMessages.push({role: 'system', name: 'system-context-anchor', eventId: `ctx-${anchorId}`, content:finalInjection});
-        prunedMessages = ctxManager.getContextMessages(prunedMessages);
+        messages.push({role: 'system', name: 'system-context-anchor', eventId: `ctx-${anchorId}`, content:finalInjection});
+        const prunedMessages = ctxManager.getContextMessages(messages);
 
         broadcastEvent('ctx-manager', 'anchor-create', crypto.randomUUID(), {
             agent : agentName, 
             content : finalInjection
         });
-    } else {
-        broadcastEvent('ctx-manager', 'anchor-skip', crypto.randomUUID(), agentName);
-    }
 
-    return prunedMessages;
+        return prunedMessages;
+    } else {
+        const prunedMessages = ctxManager.getContextMessages(messages);
+
+        broadcastEvent('ctx-manager', 'anchor-skip', crypto.randomUUID(), agentName);
+
+        return prunedMessages;
+    }
 };
 
 const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
@@ -417,20 +419,12 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
 
     const selectedConfig = agentsConfig[agentName];
 
-    const coreMessages = [
-        { eventId: crypto.randomUUID(), content: selectedConfig.system },
-        { eventId: crypto.randomUUID(), content: userPrompt },
-        { eventId: crypto.randomUUID(), content: toolHeader}
-    ];
-
     const agentTools = selectedConfig.tools.map(name => toolRegistry[name]?.definition).filter(Boolean);
 
-    ctxManager.setCore(coreMessages);
+    ctxManager.setCore(selectedConfig.system, userPrompt, toolHeader);
 
-    let messages = coreMessages;
     let iteration = 0;
-
-    const startingContext = ctxManager.getContextMessages(messages);
+    let messages = ctxManager.getStarterContext();
 
     while (iteration < agentsConfig[agentName].maxIterations) {
         checkAbort();
@@ -439,7 +433,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         const result = await withRetry(async () => ollama.chat({
             model: agentsConfig[agentName].model,
             options: agentsConfig[agentName].options,
-            messages: stripEventIds(iteration === 1 ? startingContext : messages),
+            messages: stripEventIds(messages),
             tools: agentTools,
             think: true,
             stream: true
@@ -527,8 +521,8 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
 
         if (assistantMessage.content?.trim()) {
             checkAbort();
-            const finalUpdatedMessges = await getCtxUpdate(agentName, messages, ctxManager);
-            ctxManager.dumpLastContext(finalUpdatedMessges);
+
+            await getCtxUpdate(agentName, messages, ctxManager);
 
             return { content: assistantMessage.content.trim() };
         }
@@ -536,7 +530,6 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         break;
     }
 
-    ctxManager.dumpLastContext(messages);
     return { content: `[${agentName}] Max iterations.` };
 };
 

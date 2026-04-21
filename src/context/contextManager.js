@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 
 export class ContextManager {
-    constructor(agentName, master, conversationFolder, maxRecentTurns = 15, maxAnchors = 5) {
+    constructor(agentName, master, conversationFolder, maxRecentTurns = 25, maxAnchors = 10) {
         this.agentName = agentName;
         this.master = master;
 
@@ -13,16 +13,9 @@ export class ContextManager {
         this.anchorSeq = 0;
         this.anchors = [];
 
-        this.systemDirectives = {};
-        this.pinnedUserIntent = {};
-        this.pinnedToolHeader = {};
-
-        this.clarityDirective = {
-            role : 'system',
-            name : 'system',
-            eventId : 'sys-clarity-reminder',
-            content : 'CLARITY: MAX internal density. Anchor refs by ID only. Accuracy > speed. No fluff.'
-        };
+        this.systemDirectives = '';
+        this.pinnedUserIntent = '';
+        this.pinnedToolHeader = '';
 
         const anchorsFolder = path.join(conversationFolder, 'anchors');
         if (!fs.existsSync(anchorsFolder)) fs.mkdirSync(anchorsFolder);
@@ -62,26 +55,55 @@ export class ContextManager {
         catch (err) {}
     }
 
-    dumpLastContext(lastMessages) {
-        const latestContext = this.getContextMessages(lastMessages);
-
+    #saveContext(latestContext) {
         const agentContextSpace = {
             csId : crypto.randomUUID(),
             tokenSize : this.estimateTokens(latestContext),
             contextSpace : latestContext
         }
 
-        const fileName = `${this.master}-${this.agentName}-${Date.now()}.json`;
+        const fileName = `${this.master}-${this.agentName}.json`;
         const fileToWrite = path.join(this.contextFolder, fileName);
 
         try { fs.writeFileSync(fileToWrite, JSON.stringify(agentContextSpace, null, 2), 'utf8'); } 
         catch (err) {}
     }
 
-    setCore(initialMessages) {
-        this.systemDirectives = { role : 'system', name: 'system', eventId : initialMessages[0].eventId, content : initialMessages[0].content };
-        this.pinnedUserIntent = { role : 'user', name: this.master, eventId : initialMessages[1].eventId, content : initialMessages[1].content };
-        this.pinnedToolHeader = { role : 'system', name: 'system', eventId : initialMessages[2].eventId, content : initialMessages[2].content };
+    getStarterContext() {
+        let startingContext = null;
+
+        try {
+            const fileName = `${this.master}-${this.agentName}.json`;
+            const fileToRead = path.join(this.contextFolder, fileName);
+
+            const data = fs.readFileSync(fileToRead, 'utf8');
+
+            startingContext = JSON.parse(data);
+        } 
+        catch (err) { startingContext = null }
+
+        if (!startingContext) {
+            const freshContext = this.getContextMessages(null);
+            return freshContext;
+        }
+
+        const restoredContext = startingContext.contextSpace;
+
+        restoredContext.push({
+            role : 'user',
+            name : this.master,
+            eventId : crypto.randomUUID(),
+            content : this.pinnedUserIntent
+        })
+
+        const finalReturnContext = this.getContextMessages(restoredContext);
+        return finalReturnContext;
+    }
+
+    setCore(sysDir, userInt, toolHead) {
+        this.systemDirectives = sysDir;
+        this.pinnedUserIntent = userInt;
+        this.pinnedToolHeader = toolHead;
     }
 
     estimateTokens(messages) {
@@ -111,8 +133,34 @@ export class ContextManager {
     }
 
     getContextMessages(fullMessages) {
-        const memPurgedMessages = fullMessages.filter(msg => msg?.eventId !== 'SYS-MEM');
-        const recent = memPurgedMessages.slice(-this.maxRecentTurns);
+        const starterCore = {
+            role : 'system',
+            name : 'system-core-reminder',
+            eventId : 'SYS-CORE',
+            content : `SYS-REMINDER:\n${this.systemDirectives}\n${this.pinnedToolHeader}\nUser query:\n${this.pinnedUserIntent}`
+        }
+
+        if (!fullMessages) { 
+            return [
+                starterCore,
+                {
+                    role : 'user',
+                    name : this.master,
+                    eventId : crypto.randomUUID(),
+                    content : this.pinnedUserIntent
+                }
+            ] 
+        };
+
+        const sysPurgedMessages = fullMessages.filter(msg => {
+            if (
+                msg?.eventId === 'SYS-CORE' || msg?.eventId === 'SYS-MEM'
+            ) { return false }
+
+            return true;
+        });
+
+        const recent = sysPurgedMessages.slice(-this.maxRecentTurns);
 
         const visibleAnchorIds = recent.filter((x) => x.eventId.includes('ctx-')).map((i) => Number(i.eventId.slice(4)));
         const historyOnlyAnchors = this.anchors.filter((a) => !visibleAnchorIds.includes(a.id));
@@ -125,15 +173,20 @@ export class ContextManager {
         const memoryAwareness = { role: 'system', name: 'system-context-memory', eventId: 'SYS-MEM', content: memoryContent };
         
         const curatedContext = currentAnchorHistory.length > 0 
-            ? [this.systemDirectives, this.pinnedUserIntent, this.pinnedToolHeader, this.clarityDirective, memoryAwareness, ...recent] 
-            : [this.systemDirectives, this.pinnedUserIntent, this.pinnedToolHeader, ...recent];
+            ? [starterCore, memoryAwareness, ...recent] 
+            : [starterCore, ...recent];
 
         const seen = new Set();
-        return curatedContext.filter(msg => {
+
+        const returnContext = curatedContext.filter(msg => {
             const key = msg.eventId;
             if (seen.has(key)) return false;
             seen.add(key);
             return true;
         });
+
+        this.#saveContext(returnContext);
+
+        return returnContext;
     }
 }
