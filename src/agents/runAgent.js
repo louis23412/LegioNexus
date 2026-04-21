@@ -53,14 +53,14 @@ const withRetry = async (fn, retries = 3) => {
     for (let i = 0; i <= retries; i++) {
         try { return await fn(); } catch (err) {
             if (i === retries) { 
-                broadcastEvent(null, 'ollama-calls-fail', crypto.randomUUID(), {
+                broadcastEvent('system', 'ollama-calls-fail', crypto.randomUUID(), {
                     error : err.message,
                     retries
                 })
                 throw err
             };
 
-            broadcastEvent(null, 'ollama-call-retry', crypto.randomUUID(), {
+            broadcastEvent('system', 'ollama-call-retry', crypto.randomUUID(), {
                 current_try : i + 1,
                 max_tries : retries
             })
@@ -243,7 +243,11 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         checkAbort();
         const content = chunk.message?.content || '';
         if (content) { 
-            broadcastEvent(agentName, 'sanity-check-1', denseId, content);
+            broadcastEvent('ctx-manager', 'sanity-check-1', denseId, {
+                agent : agentName,
+                content
+            });
+
             denseSummary += content;
         }
     }
@@ -255,7 +259,11 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         checkAbort();
         const content = chunk.message?.content || '';
         if (content) {
-            broadcastEvent(agentName, 'sanity-check-2', trajId, content);
+            broadcastEvent('ctx-manager', 'sanity-check-2', trajId, {
+                agent : agentName,
+                content
+            });
+
             trajectorySummary += content; 
         }
     }
@@ -293,7 +301,8 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
 
     const simSelf = convEmbedding.length ? cosineSimilarity(denseEmbedding, trajEmbedding) : 0;
 
-    broadcastEvent(agentName, 'sanity-gate', crypto.randomUUID(), {
+    broadcastEvent('ctx-manager', 'sanity-gate', crypto.randomUUID(), {
+        agent : agentName,
         semantic_similarity : { layer1 : simDense * 100, layer2: simTraj * 100, cross_layer: simSelf * 100 },
         keyword_similarity : { layer1 : jaccDense * 100, layer2 : jaccTraj * 100 },
         reliability_score : { layer1 : reliabilityDense, layer2 : reliabilityTraj }
@@ -362,7 +371,11 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         checkAbort();
         const content = chunk.message?.content || '';
         if (content) {
-            broadcastEvent(agentName, 'sanity-verify', verifyId, content);
+            broadcastEvent('ctx-manager', 'sanity-verify', verifyId, {
+                agent: agentName,
+                content
+            });
+
             verificationJson += content; 
         }
     }
@@ -388,9 +401,12 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         prunedMessages.push({role: 'system', name: 'system-context-anchor', eventId: `ctx-${anchorId}`, content:finalInjection});
         prunedMessages = ctxManager.getContextMessages(prunedMessages);
 
-        broadcastEvent(agentName, 'anchor-create', crypto.randomUUID(), { anchorId, U, S, P, T });
+        broadcastEvent('ctx-manager', 'anchor-create', crypto.randomUUID(), {
+            agent : agentName, 
+            content : finalInjection
+        });
     } else {
-        broadcastEvent(agentName, 'anchor-skip', crypto.randomUUID(), null);
+        broadcastEvent('ctx-manager', 'anchor-skip', crypto.randomUUID(), agentName);
     }
 
     return prunedMessages;
@@ -466,15 +482,11 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                 const functionName = toolCall.function.name;
                 const args = parseToolArguments(toolCall.function.arguments);
 
-                broadcastEvent(agentName, 'call-tool', crypto.randomUUID(), {
-                    function_name : functionName,
+                broadcastEvent('system', 'call-tool', crypto.randomUUID(), {
+                    caller : agentName,
+                    tool_name : functionName,
                     arguments : args
                 });
-
-                if (functionName === 'finalize_answer') {
-                    ctxManager.dumpLastContext(messages);
-                    return { content: args.final_answer || '[No answer]', explanation: args.consensus_explanation || '', finalized: true, messages };
-                }
 
                 const handler = getToolHandler(functionName, toolRegistry);
                 if (handler) {
@@ -485,7 +497,12 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                         eventId: crypto.randomUUID(), 
                         content: JSON.stringify(toolResult) 
                     });
-                    broadcastEvent(agentName, 'tool-result', crypto.randomUUID(), toolResult);
+
+                    broadcastEvent('system', 'tool-result', crypto.randomUUID(), {
+                        caller : agentName,
+                        tool_name : functionName,
+                        result : toolResult
+                    });
                 } else {
                     messages.push({ 
                         role: 'system', 
@@ -493,7 +510,11 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                         eventId: crypto.randomUUID(), 
                         content: `No handler found for tool: ${functionName}. Please use show_all_tools to get the exact names of all the tools you have access to.` 
                     });
-                    broadcastEvent(agentName, 'no-tool-handler', crypto.randomUUID(), functionName);
+
+                    broadcastEvent('system', 'no-tool-handler', crypto.randomUUID(), {
+                        caller : agentName,
+                        failed_name : functionName
+                    });
                 }
             }
 
@@ -505,15 +526,18 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         }
 
         if (assistantMessage.content?.trim()) {
-            ctxManager.dumpLastContext(messages);
-            return { content: assistantMessage.content.trim(), messages };
+            checkAbort();
+            const finalUpdatedMessges = await getCtxUpdate(agentName, messages, ctxManager);
+            ctxManager.dumpLastContext(finalUpdatedMessges);
+
+            return { content: assistantMessage.content.trim() };
         }
 
         break;
     }
 
     ctxManager.dumpLastContext(messages);
-    return { content: `[${agentName}] Max iterations.`, messages };
+    return { content: `[${agentName}] Max iterations.` };
 };
 
 export const startConversation = async (convId, userPrompt, userAlias, eSckt, signal) => {
@@ -534,9 +558,12 @@ export const startConversation = async (convId, userPrompt, userAlias, eSckt, si
     try {
         const start = performance.now();
 
-        broadcastEvent(null, 'user-prompt', crypto.randomUUID(), userPrompt);
+        broadcastEvent('system', 'user-prompt', crypto.randomUUID(), { 
+            user_prompt : userPrompt, 
+            user_alias : userAlias 
+        });
 
-        const leaderResult = await runAgent(
+        const finalResult = await runAgent(
             totalLeaders[0][0], 
             userPrompt,
             userAlias,
@@ -545,9 +572,8 @@ export const startConversation = async (convId, userPrompt, userAlias, eSckt, si
 
         const duration = ((performance.now() - start) / 1000).toFixed(2);
 
-        broadcastEvent(null, 'final-answer', crypto.randomUUID(), {
-            explanation : leaderResult.explanation,
-            final_answer : leaderResult.content,
+        broadcastEvent('system', 'final-answer', crypto.randomUUID(), {
+            final_answer : finalResult.content,
             runtime : duration
         });
 

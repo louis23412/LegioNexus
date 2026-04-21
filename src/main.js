@@ -7,6 +7,7 @@ import { startConversation } from './agents/runAgent.js';
 
 const currentWorkState = {
     isWorking: false,
+    isStopping: false,
     conversationId: null,
     userPrompt: null,
     userAlias: null,
@@ -52,23 +53,40 @@ const main = async () => {
             return;
         }
 
+        if (
+            !data ||
+            typeof data.conversationId !== 'string' || data.conversationId.trim() === '' ||
+            typeof data.prompt !== 'string' || data.prompt.trim() === '' ||
+            typeof data.alias !== 'string' || data.alias.trim() === ''
+        ) {
+            console.error('❌ Invalid input received: conversationId, prompt, and alias must be non-empty strings');
+
+            return;
+        }
+
         console.log('▶️ work started');
 
         currentWorkState.isWorking = true;
-        currentWorkState.conversationId = data.conversationId;
-        currentWorkState.userPrompt = data.prompt;
-        currentWorkState.userAlias = data.alias;
+        currentWorkState.isStopping = false;
+
+        const conversationId = data.conversationId.trim();
+        const prompt = data.prompt.trim();
+        const alias = data.alias.trim();
+
+        currentWorkState.conversationId = conversationId;
+        currentWorkState.userPrompt = prompt;
+        currentWorkState.userAlias = alias;
 
         const abortController = new AbortController();
         currentWorkState.abortController = abortController;
 
-        socket.emit('worker-state', { isWorking : true, conversationId : currentWorkState.conversationId });
+        socket.emit('worker-state', { isWorking : true, isStopping : false, conversationId : currentWorkState.conversationId });
 
         try {
             const result = await startConversation(
-                data.conversationId,
-                data.prompt,
-                data.alias,
+                conversationId,
+                prompt,
+                alias,
                 socket,
                 abortController.signal
             );
@@ -84,12 +102,13 @@ const main = async () => {
             }
         } finally {
             currentWorkState.isWorking = false;
+            currentWorkState.isStopping = false;
             currentWorkState.conversationId = null;
             currentWorkState.userPrompt = null;
             currentWorkState.userAlias = null;
             currentWorkState.abortController = null;
 
-            socket.emit('worker-state', { isWorking : false, conversationId : currentWorkState.conversationId });
+            socket.emit('worker-state', { isWorking : false, isStopping : false, conversationId : currentWorkState.conversationId });
         }
     });
 
@@ -99,17 +118,34 @@ const main = async () => {
             return;
         }
 
-        if (data.conversationId && data.conversationId !== currentWorkState.conversationId) {
+        if (currentWorkState.isStopping) {
+            console.log('ℹ️ Already stopping the conversation (spam ignored)');
+            return;
+        }
+
+        if (
+            data.conversationId &&
+            typeof data.conversationId === 'string' &&
+            data.conversationId.trim() !== currentWorkState.conversationId
+        ) {
             console.log('ℹ️ Stop request is for a different conversation');
             return;
         }
 
         console.log('⏹️ Stop signal received – aborting conversation...');
+
+        currentWorkState.isStopping = true;
         currentWorkState.abortController?.abort();
+
+        socket.emit('worker-state', { isWorking : currentWorkState.isWorking, isStopping : true, conversationId : currentWorkState.conversationId });
     });
 
     socket.on('get-worker-state', () => {
-        socket.emit('worker-state', { isWorking : currentWorkState.isWorking, conversationId : currentWorkState.conversationId });
+        socket.emit('worker-state', { 
+            isWorking : currentWorkState.isWorking, 
+            isStopping : currentWorkState.isStopping, 
+            conversationId : currentWorkState.conversationId 
+        });
     })
 
     socket.on('connect', () => {

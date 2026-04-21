@@ -25,7 +25,7 @@ export const memberDefinitions = [
             PROTOCOL: team_coordination:
             - Consult any relevant team members.
             - Keep the discussion going untill a clear consensus is formed.
-            - ONLY after reaching a clear consensus AND reviewing the chatroom, call the finalize_answer tool to wrap up.
+            - ONLY after reaching a clear consensus AND reviewing the chatroom, can you wrap up with the final answer.
 
             /strict_protocol /tool_priority /team_collaboration
         `

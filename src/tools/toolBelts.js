@@ -1,7 +1,6 @@
 const toolCollections = {
     leader_only_tools : [
-        'consult_member',
-        'finalize_answer'
+        'consult_member'
     ],
 
     all_access_tools: [
