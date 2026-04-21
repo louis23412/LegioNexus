@@ -8,7 +8,7 @@ export const definition = {
             properties: {
                 content: {
                     type: 'string',
-                    description: 'The message to post in the chat room. Keep your message short and direct to the point. Max 250 character length.'
+                    description: 'The message to post in the chat room. Keep your message short and direct to the point. Max 1500 character length.'
                 }
             },
             required: ['content'],
@@ -24,10 +24,10 @@ export const createHandler = () => {
 
         const { content } = args || {};
 
-        if (content.length < 2 || content.length > 250) {
+        if (content.length < 2 || content.length > 1500) {
             return {
                 status : 'failure',
-                error : `Incorrect message length. Min: 2 - Max: 250 - Received: ${content.length}`
+                error : `Incorrect message length. Min: 2 - Max: 1500 - Received: ${content.length}`
             }
         }
         

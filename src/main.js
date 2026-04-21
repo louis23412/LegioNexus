@@ -1,12 +1,156 @@
+import os from 'os';
+import path from 'path';
+import { io } from 'socket.io-client';
+import { Worker } from 'worker_threads';
+
 import { startConversation } from './agents/runAgent.js';
 
-const main = async (conversationId, userPrompt, userAlias) => {
-    const result = await startConversation(conversationId, userPrompt, userAlias);
-    if (!result.success) console.log(result.error);
+const currentWorkState = {
+    isWorking: false,
+    isStopping: false,
+    conversationId: null,
+    userPrompt: null,
+    userAlias: null,
+    abortController: null
 };
 
-const conversationId = 'test_conversation_1'
-const userPrompt = 'How many items are in the test array?';
-const userAlias = 'test-user1';
+const getLocalIP = () => {
+    const interfaces = os.networkInterfaces();
+    let ipAddress;
 
-main(conversationId, userPrompt, userAlias).catch(console.error);
+    Object.keys(interfaces).forEach((ifaceName) => {
+        interfaces[ifaceName].forEach((iface) => {
+            if (iface.family === 'IPv4' && !iface.internal) {
+                ipAddress = iface.address;
+            }
+        });
+    });
+
+    return ipAddress;
+};
+
+const spawnDedicatedHttpServer = (ip, port) => {
+    const httpWorker = new Worker(path.join(import.meta.dirname, 'api', 'http_worker.js'), { workerData : { ip, port } });
+
+    httpWorker.on('error', (err) => console.error('[HTTP Worker] Error:', err));
+
+    httpWorker.on('exit', (code) => {
+        if (code !== 0) console.error(`[HTTP Worker] Exited with code ${code}`);
+    });
+};
+
+const main = async () => {
+    const ipAddress = getLocalIP();
+    const port = 3005;
+
+    spawnDedicatedHttpServer(ipAddress, port);
+
+    const socket = io.connect(`http://${ipAddress}:${port}/chat`, { reconnection: true });
+
+    socket.on('start-conversation', async (data) => {
+        if (currentWorkState.isWorking) {
+            console.log('🚫 busy working, cannot start another conversation');
+            return;
+        }
+
+        if (
+            !data ||
+            typeof data.conversationId !== 'string' || data.conversationId.trim() === '' ||
+            typeof data.prompt !== 'string' || data.prompt.trim() === '' ||
+            typeof data.alias !== 'string' || data.alias.trim() === ''
+        ) {
+            console.error('❌ Invalid input received: conversationId, prompt, and alias must be non-empty strings');
+
+            return;
+        }
+
+        console.log('▶️ work started');
+
+        currentWorkState.isWorking = true;
+        currentWorkState.isStopping = false;
+
+        const conversationId = data.conversationId.trim();
+        const prompt = data.prompt.trim();
+        const alias = data.alias.trim();
+
+        currentWorkState.conversationId = conversationId;
+        currentWorkState.userPrompt = prompt;
+        currentWorkState.userAlias = alias;
+
+        const abortController = new AbortController();
+        currentWorkState.abortController = abortController;
+
+        socket.emit('worker-state', { isWorking : true, isStopping : false, conversationId : currentWorkState.conversationId });
+
+        try {
+            const result = await startConversation(
+                conversationId,
+                prompt,
+                alias,
+                socket,
+                abortController.signal
+            );
+
+            if (!result.success) {
+                console.log('❌ Conversation error:', result.error);
+            }
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                console.log('🛑 Conversation was stopped by user');
+            } else {
+                console.error('❌ Unexpected error in conversation:', err);
+            }
+        } finally {
+            currentWorkState.isWorking = false;
+            currentWorkState.isStopping = false;
+            currentWorkState.conversationId = null;
+            currentWorkState.userPrompt = null;
+            currentWorkState.userAlias = null;
+            currentWorkState.abortController = null;
+
+            socket.emit('worker-state', { isWorking : false, isStopping : false, conversationId : currentWorkState.conversationId });
+        }
+    });
+
+    socket.on('stop-conversation', (data) => {
+        if (!currentWorkState.isWorking) {
+            console.log('ℹ️ No active conversation to stop');
+            return;
+        }
+
+        if (currentWorkState.isStopping) {
+            console.log('ℹ️ Already stopping the conversation (spam ignored)');
+            return;
+        }
+
+        if (
+            data.conversationId &&
+            typeof data.conversationId === 'string' &&
+            data.conversationId.trim() !== currentWorkState.conversationId
+        ) {
+            console.log('ℹ️ Stop request is for a different conversation');
+            return;
+        }
+
+        console.log('⏹️ Stop signal received – aborting conversation...');
+
+        currentWorkState.isStopping = true;
+        currentWorkState.abortController?.abort();
+
+        socket.emit('worker-state', { isWorking : currentWorkState.isWorking, isStopping : true, conversationId : currentWorkState.conversationId });
+    });
+
+    socket.on('get-worker-state', () => {
+        socket.emit('worker-state', { 
+            isWorking : currentWorkState.isWorking, 
+            isStopping : currentWorkState.isStopping, 
+            conversationId : currentWorkState.conversationId 
+        });
+    })
+
+    socket.on('connect', () => {
+        console.log(`✅ Event server running : http://${ipAddress}:${port}/chat`);
+    });
+};
+
+main().catch(console.error);

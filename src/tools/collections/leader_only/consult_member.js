@@ -33,11 +33,6 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse })
             return createErrorResponse(`You can not consult yourself (${context.agentName})`, 'SELF_REFF');
         }
 
-        console.log(`\n🔍 [CONSULT ${context.agentName} → ${member_name}]`);
-        console.log('─'.repeat(90));
-        console.log(`\x1b[33m ${query} \x1b[0m`);
-        console.log('─'.repeat(90));
-
         let memberResult;
         try {
             memberResult = await runAgentFn(
@@ -47,7 +42,6 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse })
                 `You are being adressed by ${context.agentName}. Refer to them by this name.`
             );
         } catch (err) {
-            console.error(`❌ [CONSULT ERROR] ${member_name}:`, err.message);
             return createErrorResponse(`Member ${member_name} crashed during consultation: ${err.message}`, 'MEMBER_CRASH');
         }
 
@@ -56,7 +50,6 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse })
 
         if (isFailure) {
             memberResponseContent = `[MEMBER FAILURE] ${memberResponseContent}`;
-            console.log(`⚠️ [CONSULT] ${member_name} failed or reached max iterations`);
         }
 
         return {
