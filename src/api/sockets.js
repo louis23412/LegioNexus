@@ -9,9 +9,5 @@ export const agentEventHandler = (io) => {
 
             socket.broadcast.emit(eventName, ...args);
         });
-
-        socket.on('disconnect', (reason) => {
-            console.log(`${socket.id} disconnected. Reason: ${reason}`);
-        });
     });
 };

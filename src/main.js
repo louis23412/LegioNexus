@@ -48,10 +48,7 @@ const main = async () => {
     const socket = io.connect(`http://${ipAddress}:${port}/chat`, { reconnection: true });
 
     socket.on('start-conversation', async (data) => {
-        if (currentWorkState.isWorking) {
-            console.log('🚫 busy working, cannot start another conversation');
-            return;
-        }
+        if (currentWorkState.isWorking) { return; }
 
         if (
             !data ||
@@ -63,8 +60,6 @@ const main = async () => {
 
             return;
         }
-
-        console.log('▶️ work started');
 
         currentWorkState.isWorking = true;
         currentWorkState.isStopping = false;
@@ -82,6 +77,8 @@ const main = async () => {
 
         socket.emit('worker-state', { isWorking : true, isStopping : false, conversationId : currentWorkState.conversationId });
 
+        console.log(`[WORKER BUSY] - ID: ${currentWorkState.conversationId} | Alias: ${currentWorkState.userAlias}`);
+
         try {
             const result = await startConversation(
                 conversationId,
@@ -92,14 +89,11 @@ const main = async () => {
             );
 
             if (!result.success) {
-                console.log('❌ Conversation error:', result.error);
+                console.error('❌ Conversation error:', result.error);
             }
         } catch (err) {
-            if (err.name === 'AbortError') {
-                console.log('🛑 Conversation was stopped by user');
-            } else {
-                console.error('❌ Unexpected error in conversation:', err);
-            }
+            if (err.name === 'AbortError') {}
+            else { console.error('❌ Unexpected error in conversation:', err); }
         } finally {
             currentWorkState.isWorking = false;
             currentWorkState.isStopping = false;
@@ -109,30 +103,21 @@ const main = async () => {
             currentWorkState.abortController = null;
 
             socket.emit('worker-state', { isWorking : false, isStopping : false, conversationId : currentWorkState.conversationId });
+
+            console.log(`[WORKER IDLE]`);
         }
     });
 
     socket.on('stop-conversation', (data) => {
-        if (!currentWorkState.isWorking) {
-            console.log('ℹ️ No active conversation to stop');
-            return;
-        }
+        if (!currentWorkState.isWorking) { return; }
 
-        if (currentWorkState.isStopping) {
-            console.log('ℹ️ Already stopping the conversation (spam ignored)');
-            return;
-        }
+        if (currentWorkState.isStopping) { return; }
 
         if (
             data.conversationId &&
             typeof data.conversationId === 'string' &&
             data.conversationId.trim() !== currentWorkState.conversationId
-        ) {
-            console.log('ℹ️ Stop request is for a different conversation');
-            return;
-        }
-
-        console.log('⏹️ Stop signal received – aborting conversation...');
+        ) { return; }
 
         currentWorkState.isStopping = true;
         currentWorkState.abortController?.abort();

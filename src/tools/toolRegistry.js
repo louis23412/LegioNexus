@@ -46,7 +46,6 @@ export const createToolRegistry = async (runAgentFn, agentsConfig, inputStore) =
         }
     }
 
-    console.log('🔄 [TOOL LOADER] Scanning /tools/collections/...');
     if (fs.existsSync(collectionsDir)) {
         await loadToolsRecursively(collectionsDir);
     } else {
@@ -76,6 +75,5 @@ export const createToolRegistry = async (runAgentFn, agentsConfig, inputStore) =
             description: toolRegistry[name].definition.function.description
         }));
 
-    console.log(`📦 [TOOL REGISTRY] Loaded ${toolsToLoad.length} tools successfully\n`);
     return toolRegistry;
 };

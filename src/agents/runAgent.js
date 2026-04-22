@@ -148,19 +148,9 @@ const truncateForEmbedding = (messagesArray) => {
     return JSON.stringify(truncated);
 };
 
-const stripEventIds = (messagesArray) => {
-    return messagesArray.map(msg => {
-        if (msg && typeof msg === 'object' && !Array.isArray(msg)) {
-            const { eventId, ...cleanMsg } = msg;
-            return cleanMsg;
-        }
-        return msg;
-    });
-};
-
 const getCtxUpdate = async (agentName, messages, ctxManager) => {
     const summaryContext = ctxManager.getContextMessages(messages);
-    const modelSummaryContext = stripEventIds(summaryContext);
+    const modelSummaryContext = ctxManager.stripEventIds(summaryContext);
 
     const denseConfig = {
         model: agentsConfig[agentName].model,
@@ -396,7 +386,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
         const anchorId = ctxManager.addAnchor(bestSummary, Math.min(trustScore, bestReliability), bestType);
         const finalInjection = `[CTX_ANC_${anchorId}]=[U:${U}][S:${S}][P:${P}][T:${T}]`;
 
-        messages.push({role: 'system', name: 'system-context-anchor', eventId: `ctx-${anchorId}`, content:finalInjection});
+        messages.push({role: 'system', eventId: `ctx-${anchorId}`, content:finalInjection});
         const prunedMessages = ctxManager.getContextMessages(messages);
 
         broadcastEvent('ctx-manager', 'anchor-create', crypto.randomUUID(), {
@@ -433,15 +423,14 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         const result = await withRetry(async () => ollama.chat({
             model: agentsConfig[agentName].model,
             options: agentsConfig[agentName].options,
-            messages: stripEventIds(messages),
+            messages: ctxManager.stripEventIds(messages),
             tools: agentTools,
             think: true,
             stream: true
         }));
 
         const assistantMessage = { 
-            role: 'assistant', 
-            name: agentName, 
+            role: 'assistant',
             eventId: crypto.randomUUID(), 
             content: '', 
             thinking: '', 
@@ -469,11 +458,32 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
             if (msg.tool_calls?.length > 0) assistantMessage.tool_calls.push(...msg.tool_calls);
         }
 
+        if (!assistantMessage.thinking?.trim()) {
+            delete assistantMessage.thinking;
+        }
+
+        if (!assistantMessage.content?.trim()) {
+            delete assistantMessage.content;
+        }
+
+        if (!assistantMessage.tool_calls?.length) {
+            delete assistantMessage.tool_calls;
+        }
+
+        if (assistantMessage.tool_calls?.length > 0) {
+            assistantMessage.tool_calls = assistantMessage.tool_calls.map((tc) => ({
+                function: {
+                    tool_name: tc.function?.name ?? '',
+                    arguments: tc.function?.arguments ?? {}
+                }
+            }));
+        }
+
         messages.push(assistantMessage);
 
         if (assistantMessage.tool_calls?.length > 0) {
             for (const toolCall of assistantMessage.tool_calls) {
-                const functionName = toolCall.function.name;
+                const functionName = toolCall.function.tool_name;
                 const args = parseToolArguments(toolCall.function.arguments);
 
                 broadcastEvent('system', 'call-tool', crypto.randomUUID(), {
@@ -487,7 +497,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                     const toolResult = await handler(args, { agentName, chatroom });
                     messages.push({ 
                         role: 'tool', 
-                        name: functionName, 
+                        tool_name: functionName, 
                         eventId: crypto.randomUUID(), 
                         content: JSON.stringify(toolResult) 
                     });
@@ -499,8 +509,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                     });
                 } else {
                     messages.push({ 
-                        role: 'system', 
-                        name: 'system-tool-error', 
+                        role: 'system',
                         eventId: crypto.randomUUID(), 
                         content: `No handler found for tool: ${functionName}. Please use show_all_tools to get the exact names of all the tools you have access to.` 
                     });

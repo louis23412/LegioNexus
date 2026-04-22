@@ -58,7 +58,7 @@ export class ContextManager {
     #saveContext(latestContext) {
         const agentContextSpace = {
             csId : crypto.randomUUID(),
-            tokenSize : this.estimateTokens(latestContext),
+            tokenSize : this.estimateTokens(this.stripEventIds(latestContext)),
             contextSpace : latestContext
         }
 
@@ -91,13 +91,22 @@ export class ContextManager {
 
         restoredContext.push({
             role : 'user',
-            name : this.master,
             eventId : crypto.randomUUID(),
             content : this.pinnedUserIntent
         })
 
         const finalReturnContext = this.getContextMessages(restoredContext);
         return finalReturnContext;
+    }
+
+    stripEventIds(messagesArray) {
+        return messagesArray.map(msg => {
+            if (msg && typeof msg === 'object' && !Array.isArray(msg)) {
+                const { eventId, ...cleanMsg } = msg;
+                return cleanMsg;
+            }
+            return msg;
+        });
     }
 
     setCore(sysDir, userInt, toolHead) {
@@ -135,7 +144,6 @@ export class ContextManager {
     getContextMessages(fullMessages) {
         const starterCore = {
             role : 'system',
-            name : 'system-core-reminder',
             eventId : 'SYS-CORE',
             content : `SYS-REMINDER:\n${this.systemDirectives}\n${this.pinnedToolHeader}\nUser query:\n${this.pinnedUserIntent}`
         }
@@ -145,7 +153,6 @@ export class ContextManager {
                 starterCore,
                 {
                     role : 'user',
-                    name : this.master,
                     eventId : crypto.randomUUID(),
                     content : this.pinnedUserIntent
                 }
@@ -170,7 +177,7 @@ export class ContextManager {
         const memoryContent = `[CTX_MEM:${this.agentName} PRI:1U 2S 3A. ID route only] ` +
             currentAnchorHistory.map(a => `A${a.id}(${a.trustScore}):${a.summary}`).join('|');
         
-        const memoryAwareness = { role: 'system', name: 'system-context-memory', eventId: 'SYS-MEM', content: memoryContent };
+        const memoryAwareness = { role: 'system', eventId: 'SYS-MEM', content: memoryContent };
         
         const curatedContext = currentAnchorHistory.length > 0 
             ? [starterCore, memoryAwareness, ...recent] 
