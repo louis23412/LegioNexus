@@ -372,11 +372,23 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
 
     checkAbort();
 
-    let trustScore = 50, consistency = 50;
+    let trustScore = 0;
+    let consistency = 0;
+
     try {
-        const parsed = JSON.parse(verificationJson);
-        trustScore = Math.max(0, Math.min(100, parsed.trust_score || 50));
-        consistency = Math.max(0, Math.min(100, parsed.consistency_between_summaries || 50));
+        const cleaned = verificationJson.trim()
+            .replace(/^```json\s*/i, '')
+            .replace(/\s*```$/, '');
+
+        const parsed = JSON.parse(cleaned);
+
+        if (typeof parsed.trust_score === 'number') {
+            trustScore = Math.max(0, Math.min(100, parsed.trust_score));
+        }
+
+        if (typeof parsed.consistency_between_summaries === 'number') {
+            consistency = Math.max(0, Math.min(100, parsed.consistency_between_summaries));
+        }
     } catch (e) {}
 
     const { U, S, P, T, valid } = extractProtocolParts(bestSummary);
