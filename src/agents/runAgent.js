@@ -19,7 +19,7 @@ let eventAbort;
 const inputStore = new InputStore();
 const agentsConfig = createAgentsConfig();
 
-const EMBED_MAX_TOKENS = 35000;
+const EMBED_MAX_TOKENS = 12500;
 const embedModel = 'qwen3-embedding';
 
 const stateFolder = path.join(import.meta.dirname, '..', '..', 'state_data');
@@ -149,7 +149,7 @@ const truncateForEmbedding = (messagesArray) => {
 };
 
 const getCtxUpdate = async (agentName, messages, ctxManager) => {
-    const summaryContext = ctxManager.getContextMessages(messages);
+    const summaryContext = ctxManager.getContextMessages(messages, true);
     const modelSummaryContext = ctxManager.stripEventIds(summaryContext);
 
     const denseConfig = {
@@ -177,8 +177,6 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
             {
                 role: 'user',
                 content: `
-                    You are ${agentName}.
-                    
                     Strictly follow create_compact_past_summary protocol and summarize this:
                     ${JSON.stringify(modelSummaryContext)}
                 `
@@ -214,8 +212,6 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
             {
                 role: 'user',
                 content: `
-                    You are ${agentName}.
-                    
                     Strictly follow create_compact_past_summary protocol and summarize this:
                     ${JSON.stringify(modelSummaryContext)}
                 `
@@ -260,47 +256,58 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
 
     checkAbort();
 
-    let convText = JSON.stringify(modelSummaryContext);
-    const estTokens = Math.ceil(modelSummaryContext.reduce((acc, msg) => {
-        let content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || {});
-        return acc + (content.length / 3.7);
-    }, 0));
+    const estTokens = ctxManager.estimateTokens(modelSummaryContext);
 
+    let convText = JSON.stringify(modelSummaryContext);
     if (estTokens > EMBED_MAX_TOKENS) { convText = truncateForEmbedding(modelSummaryContext) };
 
-    const convEmbedding = await withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: convText })).embedding);
+    const allEmbeddings = await withRetry(async () => (await ollama.embed({ 
+        model : embedModel, 
+        input : [convText, denseSummary, trajectorySummary],
+        options: agentsConfig[agentName].options
+    })).embeddings);
+
+    const [ convEmbedding, denseEmbedding, trajEmbedding ] = allEmbeddings;
+
     checkAbort();
 
     const kwConv = new Set(extractKeywords(convText));
 
-    const denseEmbedding = await withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: denseSummary })).embedding);
-    checkAbort();
-
     const simDense = convEmbedding.length ? cosineSimilarity(denseEmbedding, convEmbedding) : 0;
     const kwDense = new Set(extractKeywords(denseSummary));
     const jaccDense = jaccardSimilarity(kwConv, kwDense);
-    const reliabilityDense = Math.round((simDense * 0.7 + jaccDense * 0.3) * 100);
-
-    const trajEmbedding = await withRetry(async () => (await ollama.embeddings({ model: embedModel, prompt: trajectorySummary })).embedding);
-    checkAbort();
+    const reliabilityDense = (simDense * 0.7 + jaccDense * 0.3) * 100;
 
     const simTraj = convEmbedding.length ? cosineSimilarity(trajEmbedding, convEmbedding) : 0;
     const kwTraj = new Set(extractKeywords(trajectorySummary));
     const jaccTraj = jaccardSimilarity(kwConv, kwTraj);
-    const reliabilityTraj = Math.round((simTraj * 0.7 + jaccTraj * 0.3) * 100);
+    const reliabilityTraj = (simTraj * 0.7 + jaccTraj * 0.3) * 100;
 
     const simSelf = convEmbedding.length ? cosineSimilarity(denseEmbedding, trajEmbedding) : 0;
-
-    broadcastEvent('ctx-manager', 'sanity-gate', crypto.randomUUID(), {
-        agent : agentName,
-        semantic_similarity : { layer1 : simDense * 100, layer2: simTraj * 100, cross_layer: simSelf * 100 },
-        keyword_similarity : { layer1 : jaccDense * 100, layer2 : jaccTraj * 100 },
-        reliability_score : { layer1 : reliabilityDense, layer2 : reliabilityTraj }
-    });
 
     const bestSummary = reliabilityDense >= reliabilityTraj ? denseSummary : trajectorySummary;
     const bestType = reliabilityDense >= reliabilityTraj ? 'dense' : 'trajectory';
     const bestReliability = Math.max(reliabilityDense, reliabilityTraj);
+
+    broadcastEvent('ctx-manager', 'sanity-gate', crypto.randomUUID(), {
+        agent : agentName,
+
+        semantic_similarity : { 
+            layer1 : (simDense * 100).toFixed(3), 
+            layer2: (simTraj * 100).toFixed(3), 
+            cross_layer: (simSelf * 100).toFixed(3) 
+        },
+
+        keyword_similarity : { 
+            layer1 : (jaccDense * 100).toFixed(3), 
+            layer2 : (jaccTraj * 100).toFixed(3) 
+        },
+
+        reliability_score : { 
+            layer1 : reliabilityDense.toFixed(3), 
+            layer2 : reliabilityTraj.toFixed(3) 
+        }
+    });
 
     const verificationStream = await withRetry(async () => ollama.chat({
         model: agentsConfig[agentName].model,
@@ -339,9 +346,9 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
                     - Dense : ${jaccDense.toFixed(3)} 
                     - Trajectory : ${jaccTraj.toFixed(3)}
 
-                    Reliability score (semantic x 0.7 * jaccard * 0.3):
-                    - Dense : ${reliabilityDense} 
-                    - Trajectory : ${reliabilityTraj}
+                    Reliability score:
+                    - Dense : ${reliabilityDense.toFixed(3)} 
+                    - Trajectory : ${reliabilityTraj.toFixed(3)}
 
                     Full conversation:
                     ${JSON.stringify(modelSummaryContext)}
@@ -395,11 +402,15 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
     const anchorTrustScore = Number(((trustScore + consistency + bestReliability) / 3).toFixed(3));
 
     if (valid && anchorTrustScore >= 50) {
-        const anchorId = ctxManager.addAnchor(bestSummary, Math.min(trustScore, bestReliability), bestType);
+        const anchorId = ctxManager.addAnchor(bestSummary, Math.min(trustScore, bestReliability), bestType, {
+            keywords : bestType === 'trajectory' ? [ ...kwTraj ] : [ ...kwDense ],
+            embeddings : bestType === 'trajectory' ? trajEmbedding : denseEmbedding
+        });
+
         const finalInjection = `[CTX_ANC_${anchorId}]=[U:${U}][S:${S}][P:${P}][T:${T}]`;
 
         messages.push({role: 'system', eventId: `ctx-${anchorId}`, content:finalInjection});
-        const prunedMessages = ctxManager.getContextMessages(messages);
+        const prunedMessages = ctxManager.getContextMessages(messages, false);
 
         broadcastEvent('ctx-manager', 'anchor-create', crypto.randomUUID(), {
             agent : agentName, 
@@ -408,7 +419,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
 
         return prunedMessages;
     } else {
-        const prunedMessages = ctxManager.getContextMessages(messages);
+        const prunedMessages = ctxManager.getContextMessages(messages, false);
 
         broadcastEvent('ctx-manager', 'anchor-skip', crypto.randomUUID(), agentName);
 
@@ -482,20 +493,11 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
             delete assistantMessage.tool_calls;
         }
 
-        if (assistantMessage.tool_calls?.length > 0) {
-            assistantMessage.tool_calls = assistantMessage.tool_calls.map((tc) => ({
-                function: {
-                    tool_name: tc.function?.name ?? '',
-                    arguments: tc.function?.arguments ?? {}
-                }
-            }));
-        }
-
         messages.push(assistantMessage);
 
         if (assistantMessage.tool_calls?.length > 0) {
             for (const toolCall of assistantMessage.tool_calls) {
-                const functionName = toolCall.function.tool_name;
+                const functionName = toolCall.function.name;
                 const args = parseToolArguments(toolCall.function.arguments);
 
                 broadcastEvent('system', 'call-tool', crypto.randomUUID(), {
@@ -505,8 +507,10 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                 });
 
                 const handler = getToolHandler(functionName, toolRegistry);
+
                 if (handler) {
                     const toolResult = await handler(args, { agentName, chatroom });
+
                     messages.push({ 
                         role: 'tool', 
                         tool_name: functionName, 
@@ -542,7 +546,6 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
 
         if (assistantMessage.content?.trim()) {
             checkAbort();
-
             await getCtxUpdate(agentName, messages, ctxManager);
 
             return { content: assistantMessage.content.trim() };
@@ -595,7 +598,6 @@ export const startConversation = async (convId, userPrompt, userAlias, eSckt, si
     }
     catch (error) { 
         if (error.name === 'AbortError') {
-            console.log('🛑 Conversation aborted by user request');
             return { success: true, aborted: true };
         }
         return { success : false, error } 

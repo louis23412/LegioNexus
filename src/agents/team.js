@@ -14,6 +14,7 @@ export const memberDefinitions = [
             presence_penalty : 1.5,
             top_p: 0.95,
             top_k: 20,
+            num_ctx : 16384
         },
 
         personalityGuideline : `
@@ -23,7 +24,8 @@ export const memberDefinitions = [
             Your role is to coordinate the team using the shared chatroom and tools, strictly following the team_coordination protocol.
             
             PROTOCOL: team_coordination:
-            - Consult any relevant team members.
+            - Evaluate the complexity of the user request / question / task before forming a plan of action.
+            - Consult any relevant team members if needed.
             - Keep the discussion going untill a clear consensus is formed.
             - ONLY after reaching a clear consensus AND reviewing the chatroom, can you wrap up with the final answer.
 
@@ -44,6 +46,7 @@ export const memberDefinitions = [
             presence_penalty : 1.5,
             top_p: 0.95,
             top_k: 20,
+            num_ctx : 16384
         },
 
         personalityGuideline : `
@@ -74,6 +77,7 @@ export const memberDefinitions = [
             presence_penalty : 1.5,
             top_p: 0.95,
             top_k: 20,
+            num_ctx : 16384
         },
 
         personalityGuideline : `
@@ -104,6 +108,7 @@ export const memberDefinitions = [
             presence_penalty : 1.5,
             top_p: 0.95,
             top_k: 20,
+            num_ctx : 16384
         },
 
         personalityGuideline : `

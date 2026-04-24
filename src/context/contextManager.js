@@ -83,7 +83,7 @@ export class ContextManager {
         catch (err) { startingContext = null }
 
         if (!startingContext) {
-            const freshContext = this.getContextMessages(null);
+            const freshContext = this.getContextMessages(null, false);
             return freshContext;
         }
 
@@ -95,7 +95,7 @@ export class ContextManager {
             content : this.pinnedUserIntent
         })
 
-        const finalReturnContext = this.getContextMessages(restoredContext);
+        const finalReturnContext = this.getContextMessages(restoredContext, false);
         return finalReturnContext;
     }
 
@@ -123,7 +123,7 @@ export class ContextManager {
         }, 0));
     }
 
-    addAnchor(summary, trustScore, type = 'dense') {
+    addAnchor(summary, trustScore, type, data) {
         this.anchorSeq++;
 
         const entry = {
@@ -131,7 +131,8 @@ export class ContextManager {
             summary: summary.trim(),
             trustScore: Math.max(0, Math.min(100, trustScore)),
             timestamp: Date.now(),
-            id: this.anchorSeq
+            id: this.anchorSeq,
+            data
         };
 
         this.anchors.push(entry);
@@ -141,11 +142,23 @@ export class ContextManager {
         return this.anchorSeq;
     }
 
-    getContextMessages(fullMessages) {
+    getContextMessages(fullMessages, isSummary = false) {
+        if (isSummary) {
+            const fullPurgedMessages = fullMessages.filter(msg => {
+                if (msg?.eventId === 'SYS-CORE' || msg?.eventId === 'SYS-MEM' || msg?.eventId?.includes('ctx-')) {
+                    return false;
+                }
+
+                return true;
+            })
+
+            return fullPurgedMessages.slice(-this.maxRecentTurns);
+        }
+
         const starterCore = {
             role : 'system',
             eventId : 'SYS-CORE',
-            content : `SYS-REMINDER:\n${this.systemDirectives}\n${this.pinnedToolHeader}\nUser query:\n${this.pinnedUserIntent}`
+            content : `SYS-REMINDER:\n${this.systemDirectives}\n${this.pinnedToolHeader}\nCurrent user query:\n${this.pinnedUserIntent}`
         }
 
         if (!fullMessages) { 
