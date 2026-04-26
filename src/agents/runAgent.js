@@ -125,32 +125,19 @@ const extractProtocolParts = (text) => {
     return { ...parts, valid };
 };
 
-const truncateForEmbedding = (messagesArray) => {
-    let truncated = [...messagesArray];
-    while (true) {
-        const estTokens = Math.ceil(truncated.reduce((acc, msg) => {
-            let content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || {});
-            return acc + (content.length / 3.7);
-        }, 0));
-
-        if (estTokens <= EMBED_MAX_TOKENS) break;
-
-        if (truncated.length <= 5) {
-            const last = truncated[truncated.length - 1];
-            if (last && last.content) {
-                const str = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
-                last.content = str.substring(0, Math.floor(EMBED_MAX_TOKENS * 3.7 * 0.85));
-            }
-            break;
+const stripEventIds = (messagesArray) => {
+    return messagesArray.map(msg => {
+        if (msg && typeof msg === 'object' && !Array.isArray(msg)) {
+            const { eventId, ...cleanMsg } = msg;
+            return cleanMsg;
         }
-        truncated.shift();
-    }
-    return JSON.stringify(truncated);
-};
+        return msg;
+    });
+}
 
-const getCtxUpdate = async (agentName, messages, ctxManager) => {
-    const summaryContext = ctxManager.getContextMessages(messages, true);
-    const modelSummaryContext = ctxManager.stripEventIds(summaryContext);
+const getCtxUpdate = async (agentName, messages, ctxManager, isLast) => {
+    const summaryContext = ctxManager.getContextMessages(messages, true, isLast);
+    const modelSummaryContext = stripEventIds(summaryContext);
 
     const denseConfig = {
         model: agentsConfig[agentName].model,
@@ -256,10 +243,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
 
     checkAbort();
 
-    const estTokens = ctxManager.estimateTokens(modelSummaryContext);
-
-    let convText = JSON.stringify(modelSummaryContext);
-    if (estTokens > EMBED_MAX_TOKENS) { convText = truncateForEmbedding(modelSummaryContext) };
+    const convText = JSON.stringify(modelSummaryContext);
 
     const allEmbeddings = await withRetry(async () => (await ollama.embed({ 
         model : embedModel, 
@@ -402,15 +386,22 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
     const anchorTrustScore = Number(((trustScore + consistency + bestReliability) / 3).toFixed(3));
 
     if (valid && anchorTrustScore >= 50) {
-        const anchorId = ctxManager.addAnchor(bestSummary, Math.min(trustScore, bestReliability), bestType, {
-            keywords : bestType === 'trajectory' ? [ ...kwTraj ] : [ ...kwDense ],
-            embeddings : bestType === 'trajectory' ? trajEmbedding : denseEmbedding
-        });
+        const { anchorId, anchorStatus, anchorTime, resolutionAnchor } = ctxManager.addAnchor(
+            bestSummary, anchorTrustScore, bestType, isLast, {
+                keywords : bestType === 'trajectory' ? [ ...kwTraj ] : [ ...kwDense ],
+                embeddings : bestType === 'trajectory' ? trajEmbedding : denseEmbedding
+            }
+        );
 
-        const finalInjection = `[CTX_ANC_${anchorId}]=[U:${U}][S:${S}][P:${P}][T:${T}]`;
+        const compactTimeStamp = (new Date(anchorTime).toLocaleString()).replaceAll(' ', '');
+
+        const finalInjection = `
+            [CTX_ANC_${anchorId}|STATUS:${anchorStatus}|RES_ANC:${!resolutionAnchor ? '-' : `A${resolutionAnchor}`}|SYS_TIME:${compactTimeStamp}]=[U:${U}][S:${S}][P:${P}][T:${T}]
+        `.trim();
 
         messages.push({role: 'system', eventId: `ctx-${anchorId}`, content:finalInjection});
-        const prunedMessages = ctxManager.getContextMessages(messages, false);
+
+        const prunedMessages = ctxManager.getContextMessages(messages, false, isLast);
 
         broadcastEvent('ctx-manager', 'anchor-create', crypto.randomUUID(), {
             agent : agentName, 
@@ -419,7 +410,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
 
         return prunedMessages;
     } else {
-        const prunedMessages = ctxManager.getContextMessages(messages, false);
+        const prunedMessages = ctxManager.getContextMessages(messages, false, isLast);
 
         broadcastEvent('ctx-manager', 'anchor-skip', crypto.randomUUID(), agentName);
 
@@ -428,13 +419,11 @@ const getCtxUpdate = async (agentName, messages, ctxManager) => {
 };
 
 const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
-    const ctxManager = new ContextManager(agentName, userAlias, conversationFolder);
-
     const selectedConfig = agentsConfig[agentName];
 
     const agentTools = selectedConfig.tools.map(name => toolRegistry[name]?.definition).filter(Boolean);
 
-    ctxManager.setCore(selectedConfig.system, userPrompt, toolHeader);
+    const ctxManager = new ContextManager(agentName, userAlias, conversationFolder, selectedConfig.system, userPrompt, toolHeader);
 
     let iteration = 0;
     let messages = ctxManager.getStarterContext();
@@ -446,7 +435,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         const result = await withRetry(async () => ollama.chat({
             model: agentsConfig[agentName].model,
             options: agentsConfig[agentName].options,
-            messages: ctxManager.stripEventIds(messages),
+            messages: stripEventIds(messages),
             tools: agentTools,
             think: true,
             stream: true
@@ -462,6 +451,8 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
 
         const thinkId = crypto.randomUUID();
         const contentId = crypto.randomUUID();
+
+        let currentContextSize;
 
         for await (const chunk of result) {
             checkAbort();
@@ -479,7 +470,11 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
             }
 
             if (msg.tool_calls?.length > 0) assistantMessage.tool_calls.push(...msg.tool_calls);
+
+            if (chunk.done) { currentContextSize = chunk.prompt_eval_count };
         }
+
+        if (currentContextSize) console.log(`Context capacity: ${((currentContextSize / agentsConfig[agentName].options.num_ctx) * 100).toFixed(3)}% [${currentContextSize}t]`);
 
         if (!assistantMessage.thinking?.trim()) {
             delete assistantMessage.thinking;
@@ -538,7 +533,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
             }
 
             checkAbort();
-            const contextUpdate = await getCtxUpdate(agentName, messages, ctxManager);
+            const contextUpdate = await getCtxUpdate(agentName, messages, ctxManager, false);
             messages = contextUpdate;
 
             continue;
@@ -546,7 +541,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
 
         if (assistantMessage.content?.trim()) {
             checkAbort();
-            await getCtxUpdate(agentName, messages, ctxManager);
+            await getCtxUpdate(agentName, messages, ctxManager, true);
 
             return { content: assistantMessage.content.trim() };
         }
