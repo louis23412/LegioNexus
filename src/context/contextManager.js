@@ -14,6 +14,7 @@ export class ContextManager {
         this.anchors = [];
 
         this.startingAnchor = null;
+        this.prevUserQuery = null;
 
         this.systemDirectives = sysDir;
         this.pinnedUserIntent = userInt;
@@ -60,6 +61,7 @@ export class ContextManager {
     #saveContext(latestContext) {
         const agentContextSpace = {
             csId : crypto.randomUUID(),
+            lastQuery : this.pinnedUserIntent,
             contextSpace : latestContext
         }
 
@@ -104,7 +106,7 @@ export class ContextManager {
         this.#saveAnchors();
     }
 
-    addAnchor(summary, trustScore, type, isLast, data) {
+    addAnchor(summary, trustScore, type, isLast, summaryData, result = null) {
         this.anchorSeq++;
 
         if (!this.startingAnchor) this.startingAnchor = this.anchorSeq;
@@ -116,12 +118,13 @@ export class ContextManager {
         const entry = {
             type,
             status : anchorStatus,
-            summary: summary.trim(),
             trustScore: Math.max(0, Math.min(100, trustScore)),
             timestamp: anchorCreateTime,
             id: this.anchorSeq,
             resolutionAnchor: resolutionPointer,
-            data
+            summary: summary.trim(),
+            queryAndResult : isLast ? { query : this.pinnedUserIntent, result } : null,
+            summaryData
         };
 
         this.anchors.push(entry);
@@ -150,11 +153,13 @@ export class ContextManager {
         catch (err) { startingContext = null }
 
         if (!startingContext) {
-            const freshContext = this.getContextMessages(null, false);
+            const freshContext = this.getContextMessages(null, false, false);
             return freshContext;
         }
 
         const restoredContext = startingContext.contextSpace;
+
+        this.prevUserQuery = startingContext.lastQuery
 
         restoredContext.push({
             role : 'user',
@@ -162,7 +167,8 @@ export class ContextManager {
             content : this.pinnedUserIntent
         })
 
-        const finalReturnContext = this.getContextMessages(restoredContext, false);
+        const finalReturnContext = this.getContextMessages(restoredContext, false, false);
+
         return finalReturnContext;
     }
 
@@ -182,7 +188,7 @@ export class ContextManager {
         const starterCore = {
             role : 'system',
             eventId : 'SYS-CORE',
-            content : `SYS-REMINDER:\n${this.systemDirectives}\n${this.pinnedToolHeader}\nCurrent user query:\n${this.pinnedUserIntent}`
+            content : `SYS-REMINDER:\n${this.systemDirectives}\n${this.pinnedToolHeader}${this.prevUserQuery ? `\nPrevious user query:${this.prevUserQuery}` : ''}\nCurrent user query:\n${this.pinnedUserIntent}`
         }
 
         if (!fullMessages) { 

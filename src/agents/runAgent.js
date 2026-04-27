@@ -5,9 +5,11 @@ import crypto from 'crypto';
 
 import { Chatroom } from '../chat/chatroom.js';
 import { InputStore } from '../inputs/inputStore.js';
-import { createAgentsConfig } from '../agents/agents.js';
-import { createToolRegistry } from '../tools/toolRegistry.js';
 import { ContextManager } from '../context/contextManager.js';
+
+import { createAgentsConfig } from './agents.js';
+import { summaryDefinitions } from './summaries.js';
+import { createToolRegistry } from '../tools/toolRegistry.js';
 
 let chatroom;
 let toolRegistry;
@@ -18,9 +20,6 @@ let eventAbort;
 
 const inputStore = new InputStore();
 const agentsConfig = createAgentsConfig();
-
-const EMBED_MAX_TOKENS = 12500;
-const embedModel = 'qwen3-embedding';
 
 const stateFolder = path.join(import.meta.dirname, '..', '..', 'state_data');
 if (!fs.existsSync(stateFolder)) fs.mkdirSync(stateFolder);
@@ -135,83 +134,24 @@ const stripEventIds = (messagesArray) => {
     });
 }
 
-const getCtxUpdate = async (agentName, messages, ctxManager, isLast) => {
+const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult = null) => {
     const summaryContext = ctxManager.getContextMessages(messages, true, isLast);
     const modelSummaryContext = stripEventIds(summaryContext);
 
-    const denseConfig = {
-        model: agentsConfig[agentName].model,
+    const denseSummaryStream = await withRetry(async () => ollama.chat({
+        model: summaryDefinitions.dense_summary.model,
         messages: [
-            {
-                role: 'system',
-                content: `
-                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
-
-                    PROTOCOL: create_compact_past_summary → ONLY summarize past events. MAX density.
-                    - Maximize information density per token
-                    - Use shortest possible phrases and atomic facts
-                    - Prioritize critical state changes, entities, and recency
-                    - Eliminate all redundancy and narrative fluff
-
-                    Format: [MEM:U: <user intent>][MEM:S: <system state>][MEM:P: <key events>][MEM:T: <key topics + entities>]
-                    Output: EXACTLY in protocol format. Max 1.
-
-                    No extra text, no newlines, no artifacts.
-                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
-                `
-            },
-            
-            {
-                role: 'user',
-                content: `
-                    Strictly follow create_compact_past_summary protocol and summarize this:
-                    ${JSON.stringify(modelSummaryContext)}
-                `
-            }
+            { role: 'system', content: summaryDefinitions.dense_summary.systemDirective },
+            { role: 'user', content: `Strictly follow create_compact_past_summary protocol and summarize this:\n${JSON.stringify(modelSummaryContext)}` }
         ],
         think: false,
         stream: true,
-        options: { ...agentsConfig[agentName].options, num_predict: 256 }
-    };
+        options: summaryDefinitions.dense_summary.options
+    }));
 
-    const trajectoryConfig = {
-        model: agentsConfig[agentName].model,
-        messages: [
-            {
-                role: 'system',
-                content: `
-                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
-
-                    PROTOCOL: create_compact_past_summary → ONLY summarize past events. MAX density.
-                    - Capture the causal chain and narrative flow
-                    - Highlight sequence of events, evolving intent, and decision points
-                    - Show how user intent and system state changed over time
-                    - Keep chronological coherence while staying ultra-compact
-
-                    Format: [MEM:U: <user intent>][MEM:S: <system state>][MEM:P: <key events>][MEM:T: <key topics + entities>]
-                    Output: EXACTLY in protocol format. Max 1.
-
-                    No extra text, no newlines, no artifacts.
-                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
-                `
-            },
-            
-            {
-                role: 'user',
-                content: `
-                    Strictly follow create_compact_past_summary protocol and summarize this:
-                    ${JSON.stringify(modelSummaryContext)}
-                `
-            }
-        ],
-        think: false,
-        stream: true,
-        options: { ...agentsConfig[agentName].options, num_predict: 256 }
-    };
-
-    const denseSummaryStream = await withRetry(async () => ollama.chat(denseConfig));
     let denseSummary = '';
     const denseId = crypto.randomUUID();
+
     for await (const chunk of denseSummaryStream) {
         checkAbort();
         const content = chunk.message?.content || '';
@@ -225,9 +165,20 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast) => {
         }
     }
 
-    const trajectorySummaryStream = await withRetry(async () => ollama.chat(trajectoryConfig));
+    const trajectorySummaryStream = await withRetry(async () => ollama.chat({
+        model: summaryDefinitions.trajectory_summary.model,
+        messages: [
+            { role: 'system', content: summaryDefinitions.trajectory_summary.systemDirective },
+            { role: 'user', content: `Strictly follow create_compact_past_summary protocol and summarize this:\n${JSON.stringify(modelSummaryContext)}` }
+        ],
+        think: false,
+        stream: true,
+        options: summaryDefinitions.trajectory_summary.options
+    }));
+
     let trajectorySummary = '';
     const trajId = crypto.randomUUID();
+
     for await (const chunk of trajectorySummaryStream) {
         checkAbort();
         const content = chunk.message?.content || '';
@@ -246,7 +197,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast) => {
     const convText = JSON.stringify(modelSummaryContext);
 
     const allEmbeddings = await withRetry(async () => (await ollama.embed({ 
-        model : embedModel, 
+        model : summaryDefinitions.embed_model, 
         input : [convText, denseSummary, trajectorySummary],
         options: agentsConfig[agentName].options
     })).embeddings);
@@ -294,22 +245,9 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast) => {
     });
 
     const verificationStream = await withRetry(async () => ollama.chat({
-        model: agentsConfig[agentName].model,
+        model: summaryDefinitions.verification_summary.model,
         messages: [
-            {
-                role: 'system',
-                content: `
-                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
-
-                    PROTOCOL: verify_and_consolidate → ONLY JSON.
-                    Format: {"trust_score":0-100,"consistency_between_summaries":0-100}
-                    Output: EXACTLY in protocol format. Max 1.
-
-                    No extra text, no newlines, no artifacts.
-                    /no_think /no_future /no_suggestions /no_planning /strict_protocol /min_artifacts /max_info_capture
-                `
-            }, 
-            
+            { role: 'system', content: summaryDefinitions.verification_summary.systemDirective },
             {
                 role: 'user',
                 content: `
@@ -342,7 +280,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast) => {
         think: false,
         stream: true,
         format: 'json',
-        options: { ...agentsConfig[agentName].options, num_predict: 256 }
+        options: summaryDefinitions.verification_summary.options
     }));
 
     let verificationJson = '';
@@ -390,7 +328,8 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast) => {
             bestSummary, anchorTrustScore, bestType, isLast, {
                 keywords : bestType === 'trajectory' ? [ ...kwTraj ] : [ ...kwDense ],
                 embeddings : bestType === 'trajectory' ? trajEmbedding : denseEmbedding
-            }
+            },
+            finalResult
         );
 
         const compactTimeStamp = (new Date(anchorTime).toLocaleString()).replaceAll(' ', '');
@@ -453,6 +392,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         const contentId = crypto.randomUUID();
 
         let currentContextSize;
+        let contextFillPct;
 
         for await (const chunk of result) {
             checkAbort();
@@ -474,7 +414,16 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
             if (chunk.done) { currentContextSize = chunk.prompt_eval_count };
         }
 
-        if (currentContextSize) console.log(`Context capacity: ${((currentContextSize / agentsConfig[agentName].options.num_ctx) * 100).toFixed(3)}% [${currentContextSize}t]`);
+        if (currentContextSize) {
+            contextFillPct = Number(((currentContextSize / agentsConfig[agentName].options.num_ctx) * 100).toFixed(3));
+
+            `Context capacity: ${contextFillPct}% [${currentContextSize}t]`
+
+            broadcastEvent('system', 'context-capacity', crypto.randomUUID(), {
+                fill_pct : contextFillPct,
+                token_size : currentContextSize
+            })
+        };
 
         if (!assistantMessage.thinking?.trim()) {
             delete assistantMessage.thinking;
@@ -533,15 +482,16 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
             }
 
             checkAbort();
-            const contextUpdate = await getCtxUpdate(agentName, messages, ctxManager, false);
-            messages = contextUpdate;
+
+            messages = await getCtxUpdate(agentName, messages, ctxManager, false, null);
 
             continue;
         }
 
         if (assistantMessage.content?.trim()) {
             checkAbort();
-            await getCtxUpdate(agentName, messages, ctxManager, true);
+
+            await getCtxUpdate(agentName, messages, ctxManager, true, assistantMessage.content.trim());
 
             return { content: assistantMessage.content.trim() };
         }
