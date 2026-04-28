@@ -2,14 +2,15 @@ import fs from 'fs';
 import path from 'path';
 import ollama from 'ollama';
 import crypto from 'crypto';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import { Chatroom } from '../chat/chatroom.js';
 import { InputStore } from '../inputs/inputStore.js';
 import { ContextManager } from '../context/contextManager.js';
 
 import { createAgentsConfig } from './agents.js';
-import { summaryDefinitions } from './summaries.js';
 import { createToolRegistry } from '../tools/toolRegistry.js';
+import { summaryDefinitions, memTemplate, verifyTemplate } from './summaries.js';
 
 let chatroom;
 let toolRegistry;
@@ -92,38 +93,6 @@ const jaccardSimilarity = (setA, setB) => {
     return union.size === 0 ? 0 : intersection.size / union.size;
 };
 
-const extractProtocolParts = (text) => {
-    if (!text || typeof text !== 'string' || text.trim() === '') {
-        return { U: '—', S: '—', P: '—', T: '—', valid: false };
-    }
-
-    const memRegex = /\[?MEM:([A-Z]):\s*([^\]]+?)\]?(?=\s*\[?MEM:|$)/gi;
-
-    const parts = { U: '—', S: '—', P: '—', T: '—' };
-
-    let match;
-    while ((match = memRegex.exec(text)) !== null) {
-        const key = match[1];
-        const value = match[2].trim();
-        if (key in parts) {
-            parts[key] = value || '—';
-        }
-    }
-
-    if (Object.values(parts).every(v => v === '—')) {
-        const fallbackRegex = /MEM:([A-Z]):\s*([^\n]+)/gi;
-        while ((match = fallbackRegex.exec(text)) !== null) {
-            const key = match[1];
-            const value = match[2].trim();
-            if (key in parts) parts[key] = value || '—';
-        }
-    }
-
-    const valid = !Object.values(parts).some(v => v === '—');
-
-    return { ...parts, valid };
-};
-
 const stripEventIds = (messagesArray) => {
     return messagesArray.map(msg => {
         if (msg && typeof msg === 'object' && !Array.isArray(msg)) {
@@ -132,97 +101,22 @@ const stripEventIds = (messagesArray) => {
         }
         return msg;
     });
-}
+};
 
-const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult = null) => {
-    const summaryContext = ctxManager.getContextMessages(messages, true, isLast);
-    const modelSummaryContext = stripEventIds(summaryContext);
+const analyzeAnchorData = (context, agentName, embeddingData, summaryData) => {
+    const kwConv = new Set(extractKeywords(context));
 
-    const denseSummaryStream = await withRetry(async () => ollama.chat({
-        model: summaryDefinitions.dense_summary.model,
-        messages: [
-            { role: 'system', content: summaryDefinitions.dense_summary.systemDirective },
-            { role: 'user', content: `Strictly follow create_compact_past_summary protocol and summarize this:\n${JSON.stringify(modelSummaryContext)}` }
-        ],
-        think: false,
-        stream: true,
-        options: summaryDefinitions.dense_summary.options
-    }));
-
-    let denseSummary = '';
-    const denseId = crypto.randomUUID();
-
-    for await (const chunk of denseSummaryStream) {
-        checkAbort();
-        const content = chunk.message?.content || '';
-        if (content) { 
-            broadcastEvent('ctx-manager', 'sanity-check-1', denseId, {
-                agent : agentName,
-                content
-            });
-
-            denseSummary += content;
-        }
-    }
-
-    const trajectorySummaryStream = await withRetry(async () => ollama.chat({
-        model: summaryDefinitions.trajectory_summary.model,
-        messages: [
-            { role: 'system', content: summaryDefinitions.trajectory_summary.systemDirective },
-            { role: 'user', content: `Strictly follow create_compact_past_summary protocol and summarize this:\n${JSON.stringify(modelSummaryContext)}` }
-        ],
-        think: false,
-        stream: true,
-        options: summaryDefinitions.trajectory_summary.options
-    }));
-
-    let trajectorySummary = '';
-    const trajId = crypto.randomUUID();
-
-    for await (const chunk of trajectorySummaryStream) {
-        checkAbort();
-        const content = chunk.message?.content || '';
-        if (content) {
-            broadcastEvent('ctx-manager', 'sanity-check-2', trajId, {
-                agent : agentName,
-                content
-            });
-
-            trajectorySummary += content; 
-        }
-    }
-
-    checkAbort();
-
-    const convText = JSON.stringify(modelSummaryContext);
-
-    const allEmbeddings = await withRetry(async () => (await ollama.embed({ 
-        model : summaryDefinitions.embed_model, 
-        input : [convText, denseSummary, trajectorySummary],
-        options: agentsConfig[agentName].options
-    })).embeddings);
-
-    const [ convEmbedding, denseEmbedding, trajEmbedding ] = allEmbeddings;
-
-    checkAbort();
-
-    const kwConv = new Set(extractKeywords(convText));
-
-    const simDense = convEmbedding.length ? cosineSimilarity(denseEmbedding, convEmbedding) : 0;
-    const kwDense = new Set(extractKeywords(denseSummary));
+    const simDense = embeddingData.convEmbedding.length ? cosineSimilarity(embeddingData.denseEmbedding, embeddingData.convEmbedding) : 0;
+    const kwDense = new Set(extractKeywords(summaryData.denseSummary));
     const jaccDense = jaccardSimilarity(kwConv, kwDense);
     const reliabilityDense = (simDense * 0.7 + jaccDense * 0.3) * 100;
 
-    const simTraj = convEmbedding.length ? cosineSimilarity(trajEmbedding, convEmbedding) : 0;
-    const kwTraj = new Set(extractKeywords(trajectorySummary));
+    const simTraj = embeddingData.convEmbedding.length ? cosineSimilarity(embeddingData.trajEmbedding, embeddingData.convEmbedding) : 0;
+    const kwTraj = new Set(extractKeywords(summaryData.trajectorySummary));
     const jaccTraj = jaccardSimilarity(kwConv, kwTraj);
     const reliabilityTraj = (simTraj * 0.7 + jaccTraj * 0.3) * 100;
 
-    const simSelf = convEmbedding.length ? cosineSimilarity(denseEmbedding, trajEmbedding) : 0;
-
-    const bestSummary = reliabilityDense >= reliabilityTraj ? denseSummary : trajectorySummary;
-    const bestType = reliabilityDense >= reliabilityTraj ? 'dense' : 'trajectory';
-    const bestReliability = Math.max(reliabilityDense, reliabilityTraj);
+    const simSelf = embeddingData.convEmbedding.length ? cosineSimilarity(embeddingData.denseEmbedding, embeddingData.trajEmbedding) : 0;
 
     broadcastEvent('ctx-manager', 'sanity-gate', crypto.randomUUID(), {
         agent : agentName,
@@ -244,89 +138,180 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult
         }
     });
 
-    const verificationStream = await withRetry(async () => ollama.chat({
+    return {
+        kwDense, kwTraj,
+        jaccDense, jaccTraj, 
+        simDense, simTraj, simSelf,
+        reliabilityDense, reliabilityTraj,
+        denseSummary : summaryData.denseSummary,
+        trajectorySummary : summaryData.trajectorySummary, 
+    }
+};
+
+const getContextSummary = async (type, context, agentName) => {
+    const selectedSumType = summaryDefinitions[type];
+
+    let summaryContent = {};
+    const summaryId = crypto.randomUUID();
+
+    const response = await withRetry(async () => ollama.chat({
+        model: selectedSumType.model,
+
+        messages: [
+            { role: 'system', content: selectedSumType.systemDirective },
+            { role: 'user', content: `Strictly follow the create_dense_summary protocol and summarize this:\n${JSON.stringify(context)}` }
+        ],
+
+        think: false,
+        stream: false,
+
+        format: zodToJsonSchema(memTemplate),
+
+        options: selectedSumType.options
+    }));
+
+    try {
+        const fullContent = response.message?.content || '';
+
+        const sanityNum = type === 'dense_summary' ? 'sanity-check-1' : 'sanity-check-2';
+
+        if (fullContent) {
+            broadcastEvent('ctx-manager', sanityNum, summaryId, {
+                agent: agentName,
+                content: fullContent
+            });
+
+            summaryContent = fullContent;
+        }
+
+        summaryContent = memTemplate.parse(JSON.parse(summaryContent));
+
+    } catch (err) {
+        summaryContent = {};
+    }
+
+    return summaryContent;
+};
+
+const getVerificationSummary = async (context, agentName, anchorData) => {
+    let verificationContent = {};
+    const verifyId = crypto.randomUUID();
+
+    const response = await withRetry(async () => ollama.chat({
         model: summaryDefinitions.verification_summary.model,
+
         messages: [
             { role: 'system', content: summaryDefinitions.verification_summary.systemDirective },
+
             {
                 role: 'user',
                 content: `
-                    Strictly follow verify_and_consolidate protocol and evaluate both summaries against the main conversation:
+                    Strictly follow the verify_and_consolidate protocol and evaluate both summaries against the main conversation:
 
                     1. Dense style summary:
-                    ${denseSummary}
+                    ${anchorData.denseSummary}
 
                     2. Trajectory style summary:
-                    ${trajectorySummary}
+                    ${anchorData.trajectorySummary}
 
                     Semantic similarity:
-                    - Dense vs Full conversation : ${simDense.toFixed(3)} 
-                    - Trajectory vs Full conversation : ${simTraj.toFixed(3)} 
-                    - Dense vs Trajectory : ${simSelf.toFixed(3)}
+                    - Dense vs Full conversation : ${anchorData.simDense.toFixed(3)} 
+                    - Trajectory vs Full conversation : ${anchorData.simTraj.toFixed(3)} 
+                    - Dense vs Trajectory : ${anchorData.simSelf.toFixed(3)}
 
                     Jaccard keyword similarity:
-                    - Dense : ${jaccDense.toFixed(3)} 
-                    - Trajectory : ${jaccTraj.toFixed(3)}
+                    - Dense : ${anchorData.jaccDense.toFixed(3)} 
+                    - Trajectory : ${anchorData.jaccTraj.toFixed(3)}
 
                     Reliability score:
-                    - Dense : ${reliabilityDense.toFixed(3)} 
-                    - Trajectory : ${reliabilityTraj.toFixed(3)}
+                    - Dense : ${anchorData.reliabilityDense.toFixed(3)} 
+                    - Trajectory : ${anchorData.reliabilityTraj.toFixed(3)}
 
                     Full conversation:
-                    ${JSON.stringify(modelSummaryContext)}
+                    ${context}
                 `
             }
         ],
+
         think: false,
-        stream: true,
-        format: 'json',
+        stream: false,
+
+        format: zodToJsonSchema(verifyTemplate),
+
         options: summaryDefinitions.verification_summary.options
     }));
 
-    let verificationJson = '';
-    const verifyId = crypto.randomUUID();
+    try {
+        const fullContent = response.message?.content || '';
 
-    for await (const chunk of verificationStream) {
-        checkAbort();
-        const content = chunk.message?.content || '';
-        if (content) {
+        if (fullContent) {
             broadcastEvent('ctx-manager', 'sanity-verify', verifyId, {
                 agent: agentName,
-                content
+                content : fullContent
             });
 
-            verificationJson += content; 
+            verificationContent = fullContent;
+
+            verificationContent = verifyTemplate.parse(JSON.parse(verificationContent))
         }
+    } catch (err) {
+        verificationContent = {};
     }
+
+    return verificationContent;
+};
+
+const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult = null) => {
+    const summaryContext = ctxManager.getContextMessages(messages, true, isLast);
+    const modelSummaryContext = JSON.stringify(stripEventIds(summaryContext));
+
+    const denseSummaryObject = await getContextSummary('dense_summary', modelSummaryContext, agentName);
+    const denseSummary = JSON.stringify(denseSummaryObject);
 
     checkAbort();
 
-    let trustScore = 0;
-    let consistency = 0;
+    const trajectorySummaryObject = await getContextSummary('trajectory_summary', modelSummaryContext, agentName);
+    const trajectorySummary = JSON.stringify(trajectorySummaryObject);
 
-    try {
-        const cleaned = verificationJson.trim()
-            .replace(/^```json\s*/i, '')
-            .replace(/\s*```$/, '');
+    checkAbort();
 
-        const parsed = JSON.parse(cleaned);
+    const allEmbeddings = await withRetry(async () => (await ollama.embed({ 
+        model : summaryDefinitions.embed_model.model, 
+        input : [modelSummaryContext, denseSummary, trajectorySummary],
+        options: summaryDefinitions.embed_model.options
+    })).embeddings);
 
-        if (typeof parsed.trust_score === 'number') {
-            trustScore = Math.max(0, Math.min(100, parsed.trust_score));
-        }
+    const [ convEmbedding, denseEmbedding, trajEmbedding ] = allEmbeddings;
 
-        if (typeof parsed.consistency_between_summaries === 'number') {
-            consistency = Math.max(0, Math.min(100, parsed.consistency_between_summaries));
-        }
-    } catch (e) {}
+    checkAbort();
 
-    const { U, S, P, T, valid } = extractProtocolParts(bestSummary);
+    const fullAnchorData = analyzeAnchorData(
+        modelSummaryContext, agentName, 
+        { convEmbedding, denseEmbedding, trajEmbedding }, 
+        { denseSummary, trajectorySummary }
+    );
+
+    checkAbort();
+
+    const verificationJson = await getVerificationSummary(modelSummaryContext, agentName, fullAnchorData);
+
+    const trustScore = verificationJson?.trust_score ? verificationJson.trust_score : 0;
+    const consistency = verificationJson?.consistency_between_summaries ? verificationJson.consistency_between_summaries : 0;
+
+    checkAbort();
+
+    const bestSummary = fullAnchorData.reliabilityDense >= fullAnchorData.reliabilityTraj ? denseSummaryObject : trajectorySummaryObject;
+    const bestType = fullAnchorData.reliabilityDense >= fullAnchorData.reliabilityTraj ? 'dense' : 'trajectory';
+    const bestReliability = Math.max(fullAnchorData.reliabilityDense, fullAnchorData.reliabilityTraj);
+
+    const { U, S, P, T } = bestSummary;
+
     const anchorTrustScore = Number(((trustScore + consistency + bestReliability) / 3).toFixed(3));
 
-    if (valid && anchorTrustScore >= 50) {
+    if (anchorTrustScore >= 50) {
         const { anchorId, anchorStatus, anchorTime, resolutionAnchor } = ctxManager.addAnchor(
             bestSummary, anchorTrustScore, bestType, isLast, {
-                keywords : bestType === 'trajectory' ? [ ...kwTraj ] : [ ...kwDense ],
+                keywords : bestType === 'trajectory' ? [ ...fullAnchorData.kwTraj ] : [ ...fullAnchorData.kwDense ],
                 embeddings : bestType === 'trajectory' ? trajEmbedding : denseEmbedding
             },
             finalResult
@@ -416,8 +401,6 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
 
         if (currentContextSize) {
             contextFillPct = Number(((currentContextSize / agentsConfig[agentName].options.num_ctx) * 100).toFixed(3));
-
-            `Context capacity: ${contextFillPct}% [${currentContextSize}t]`
 
             broadcastEvent('system', 'context-capacity', crypto.randomUUID(), {
                 fill_pct : contextFillPct,

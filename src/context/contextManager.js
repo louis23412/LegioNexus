@@ -122,7 +122,7 @@ export class ContextManager {
             timestamp: anchorCreateTime,
             id: this.anchorSeq,
             resolutionAnchor: resolutionPointer,
-            summary: summary.trim(),
+            summaryObj : summary,
             queryAndResult : isLast ? { query : this.pinnedUserIntent, result } : null,
             summaryData
         };
@@ -234,7 +234,7 @@ export class ContextManager {
         }
 
         const memoryContent = `[CTX_MEM:${this.agentName} PRI:1U 2S 3A. ID route only] ` +
-            currentAnchorHistory.map(a => `A${a.id}(${a.trustScore}):${a.summary}`).join('|');
+            currentAnchorHistory.map(a => `A${a.id}(${a.trustScore}):${JSON.stringify(a.summaryObj)}`).join('|');
         
         const memoryAwareness = { role: 'system', eventId: 'SYS-MEM', content: memoryContent };
         
