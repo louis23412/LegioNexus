@@ -70,29 +70,6 @@ const withRetry = async (fn, retries = 3) => {
     }
 };
 
-const cosineSimilarity = (a, b) => {
-    if (!a || !a.length || !b || !b.length || a.length !== b.length) return 0;
-    let dot = 0, magA = 0, magB = 0;
-    for (let i = 0; i < a.length; i++) {
-        dot += a[i] * b[i];
-        magA += a[i] * a[i];
-        magB += b[i] * b[i];
-    }
-    if (magA === 0 || magB === 0) return 0;
-    return dot / (Math.sqrt(magA) * Math.sqrt(magB));
-};
-
-const extractKeywords = (text) => {
-    return (text.toLowerCase().match(/\b[a-z]{4,}\b/g) || [])
-        .filter(w => !/^\d+$/.test(w));
-};
-
-const jaccardSimilarity = (setA, setB) => {
-    const intersection = new Set([...setA].filter(x => setB.has(x)));
-    const union = new Set([...setA, ...setB]);
-    return union.size === 0 ? 0 : intersection.size / union.size;
-};
-
 const stripEventIds = (messagesArray) => {
     return messagesArray.map(msg => {
         if (msg && typeof msg === 'object' && !Array.isArray(msg)) {
@@ -103,49 +80,29 @@ const stripEventIds = (messagesArray) => {
     });
 };
 
-const analyzeAnchorData = (context, agentName, embeddingData, summaryData) => {
-    const kwConv = new Set(extractKeywords(context));
+const calculateTrustScore = (anchorData, verifierTrust, consistency) => {
+    const weights = {
+        semantic_fidelity: 0.35,
+        keyword_overlap: 0.15,
+        verification_trust: 0.25,
+        consistency: 0.12,
+        cross_summary_agreement: 0.08,
+        reliability_delta: 0.05
+    };
 
-    const simDense = embeddingData.convEmbedding.length ? cosineSimilarity(embeddingData.denseEmbedding, embeddingData.convEmbedding) : 0;
-    const kwDense = new Set(extractKeywords(summaryData.denseSummary));
-    const jaccDense = jaccardSimilarity(kwConv, kwDense);
-    const reliabilityDense = (simDense * 0.7 + jaccDense * 0.3) * 100;
+    const avgSim = (anchorData.simDense + anchorData.simTraj) / 2;
+    const avgJacc = (anchorData.jaccDense + anchorData.jaccTraj) / 2;
+    const crossAgreementBonus = Math.max(0, 100 - Math.abs(anchorData.simSelf - 75)) * 0.3;
 
-    const simTraj = embeddingData.convEmbedding.length ? cosineSimilarity(embeddingData.trajEmbedding, embeddingData.convEmbedding) : 0;
-    const kwTraj = new Set(extractKeywords(summaryData.trajectorySummary));
-    const jaccTraj = jaccardSimilarity(kwConv, kwTraj);
-    const reliabilityTraj = (simTraj * 0.7 + jaccTraj * 0.3) * 100;
+    const baseScore = 
+        weights.semantic_fidelity * avgSim +
+        weights.keyword_overlap * avgJacc +
+        weights.verification_trust * verifierTrust +
+        weights.consistency * consistency +
+        weights.cross_summary_agreement * crossAgreementBonus +
+        weights.reliability_delta * (100 - Math.abs(anchorData.reliabilityDense - anchorData.reliabilityTraj));
 
-    const simSelf = embeddingData.convEmbedding.length ? cosineSimilarity(embeddingData.denseEmbedding, embeddingData.trajEmbedding) : 0;
-
-    broadcastEvent('ctx-manager', 'sanity-gate', crypto.randomUUID(), {
-        agent : agentName,
-
-        semantic_similarity : { 
-            layer1 : (simDense * 100).toFixed(3), 
-            layer2: (simTraj * 100).toFixed(3), 
-            cross_layer: (simSelf * 100).toFixed(3) 
-        },
-
-        keyword_similarity : { 
-            layer1 : (jaccDense * 100).toFixed(3), 
-            layer2 : (jaccTraj * 100).toFixed(3) 
-        },
-
-        reliability_score : { 
-            layer1 : reliabilityDense.toFixed(3), 
-            layer2 : reliabilityTraj.toFixed(3) 
-        }
-    });
-
-    return {
-        kwDense, kwTraj,
-        jaccDense, jaccTraj, 
-        simDense, simTraj, simSelf,
-        reliabilityDense, reliabilityTraj,
-        denseSummary : summaryData.denseSummary,
-        trajectorySummary : summaryData.trajectorySummary, 
-    }
+    return Number(baseScore.toFixed(3));
 };
 
 const getContextSummary = async (type, context, agentName) => {
@@ -215,17 +172,17 @@ const getVerificationSummary = async (context, agentName, anchorData) => {
                     ${anchorData.trajectorySummary}
 
                     Semantic similarity:
-                    - Dense vs Full conversation : ${anchorData.simDense.toFixed(3)} 
-                    - Trajectory vs Full conversation : ${anchorData.simTraj.toFixed(3)} 
-                    - Dense vs Trajectory : ${anchorData.simSelf.toFixed(3)}
+                    - Dense vs Full conversation : ${anchorData.simDense} 
+                    - Trajectory vs Full conversation : ${anchorData.simTraj} 
+                    - Dense vs Trajectory : ${anchorData.simSelf}
 
                     Jaccard keyword similarity:
-                    - Dense : ${anchorData.jaccDense.toFixed(3)} 
-                    - Trajectory : ${anchorData.jaccTraj.toFixed(3)}
+                    - Dense : ${anchorData.jaccDense} 
+                    - Trajectory : ${anchorData.jaccTraj}
 
                     Reliability score:
-                    - Dense : ${anchorData.reliabilityDense.toFixed(3)} 
-                    - Trajectory : ${anchorData.reliabilityTraj.toFixed(3)}
+                    - Dense : ${anchorData.reliabilityDense} 
+                    - Trajectory : ${anchorData.reliabilityTraj}
 
                     Full conversation:
                     ${context}
@@ -285,34 +242,52 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult
 
     checkAbort();
 
-    const fullAnchorData = analyzeAnchorData(
-        modelSummaryContext, agentName, 
+    const fullAnchorData = ctxManager.extractAnchorFeatures(
+        modelSummaryContext, 
         { convEmbedding, denseEmbedding, trajEmbedding }, 
         { denseSummary, trajectorySummary }
     );
+
+    broadcastEvent('ctx-manager', 'sanity-gate', crypto.randomUUID(), {
+        agent : agentName,
+        semantic_similarity : { layer1 : fullAnchorData.simDense, layer2: fullAnchorData.simTraj, cross_layer: fullAnchorData.simSelf },
+        keyword_similarity : { layer1 : fullAnchorData.jaccDense, layer2 : fullAnchorData.jaccTraj },
+        reliability_score : { layer1 : fullAnchorData.reliabilityDense, layer2 : fullAnchorData.reliabilityTraj }
+    });
 
     checkAbort();
 
     const verificationJson = await getVerificationSummary(modelSummaryContext, agentName, fullAnchorData);
 
-    const trustScore = verificationJson?.trust_score ? verificationJson.trust_score : 0;
+    const verifierTrustScore = verificationJson?.trust_score ? verificationJson.trust_score : 0;
     const consistency = verificationJson?.consistency_between_summaries ? verificationJson.consistency_between_summaries : 0;
 
     checkAbort();
 
     const bestSummary = fullAnchorData.reliabilityDense >= fullAnchorData.reliabilityTraj ? denseSummaryObject : trajectorySummaryObject;
-    const bestType = fullAnchorData.reliabilityDense >= fullAnchorData.reliabilityTraj ? 'dense' : 'trajectory';
-    const bestReliability = Math.max(fullAnchorData.reliabilityDense, fullAnchorData.reliabilityTraj);
 
     const { U, S, P, T } = bestSummary;
 
-    const anchorTrustScore = Number(((trustScore + consistency + bestReliability) / 3).toFixed(3));
+    const anchorTrustScore = calculateTrustScore(fullAnchorData, verifierTrustScore, consistency);
 
     if (anchorTrustScore >= 50) {
         const { anchorId, anchorStatus, anchorTime, resolutionAnchor } = ctxManager.addAnchor(
-            bestSummary, anchorTrustScore, bestType, isLast, {
-                keywords : bestType === 'trajectory' ? [ ...fullAnchorData.kwTraj ] : [ ...fullAnchorData.kwDense ],
-                embeddings : bestType === 'trajectory' ? trajEmbedding : denseEmbedding
+            anchorTrustScore, isLast, {
+                dense : {
+                    summary : denseSummaryObject,
+                    keywords : [ ...fullAnchorData.kwDense ],
+                    embeddings : denseEmbedding
+                },
+
+                trajectory : {
+                    summary : trajectorySummaryObject,
+                    keywords : [ ...fullAnchorData.kwTraj ],
+                    embeddings : trajEmbedding
+                }
+            }, {
+                turns : stripEventIds(summaryContext),
+                keywords : [ ...fullAnchorData.kwConv ],
+                embeddings : convEmbedding
             },
             finalResult
         );
