@@ -5,23 +5,23 @@ export class Chatroom {
     #saveFile;
     #messages = [];
 
-    constructor(stateFolder) {
-        this.#saveFile = path.join(stateFolder, 'chatroom.json');
-        this.#load();
+    constructor() {
+        // this.#saveFile = path.join(stateFolder, 'chatroom.json');
+        // this.#load();
     }
 
-    #load() {
-        try {
-            const data = fs.readFileSync(this.#saveFile, 'utf8');
-            this.#messages = JSON.parse(data);
-        } 
-        catch (err) { this.#messages = []; }
-    }
+    // #load() {
+    //     try {
+    //         const data = fs.readFileSync(this.#saveFile, 'utf8');
+    //         this.#messages = JSON.parse(data);
+    //     } 
+    //     catch (err) { this.#messages = []; }
+    // }
 
-    #save() {
-        try { fs.writeFileSync(this.#saveFile, JSON.stringify(this.#messages, null, 2), 'utf8'); } 
-        catch (err) {}
-    }
+    // #save() {
+    //     try { fs.writeFileSync(this.#saveFile, JSON.stringify(this.#messages, null, 2), 'utf8'); } 
+    //     catch (err) {}
+    // }
 
     sendMessage(speaker, content) {
         this.#messages.push({
@@ -31,7 +31,7 @@ export class Chatroom {
             content
         });
 
-        this.#save();
+        // this.#save();
 
         return this.#messages.length;
     }

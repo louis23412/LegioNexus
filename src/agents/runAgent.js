@@ -1,5 +1,3 @@
-import fs from 'fs';
-import path from 'path';
 import ollama from 'ollama';
 import crypto from 'crypto';
 import { zodToJsonSchema } from 'zod-to-json-schema';
@@ -12,22 +10,46 @@ import { createAgentsConfig } from './agents.js';
 import { createToolRegistry } from '../tools/toolRegistry.js';
 import { summaryDefinitions, memTemplate, verifyTemplate } from './summaries.js';
 
-let chatroom;
-let toolRegistry;
-let conversationFolder;
+const activeState = {
+    conversationId : null,
 
-let eventSocket;
-let eventAbort;
+    eventSocket : null,
+    eventAbort : null,
 
-const inputStore = new InputStore();
-const agentsConfig = createAgentsConfig();
+    chatroom : null,
+    toolRegistry : null,
+    agentsConfig : null
+};
 
-const stateFolder = path.join(import.meta.dirname, '..', '..', 'state_data');
-if (!fs.existsSync(stateFolder)) fs.mkdirSync(stateFolder);
+const setActiveState = async (id, sckt, sig) => {
+    activeState.conversationId = id;
 
-const broadcastEvent = (agentName, eventType, eventId, data) => eventSocket.emit(eventType, { agentName, eventId, data });
+    activeState.eventSocket = sckt;
+    activeState.eventAbort = sig;
+    
+    activeState.chatroom = new Chatroom();
+    activeState.agentsConfig = createAgentsConfig();
 
-const getToolHandler = (toolName, registry) => registry[toolName]?.handler || null;
+    const inputStore = new InputStore();
+    activeState.toolRegistry = await createToolRegistry(runAgent, activeState.agentsConfig, inputStore);
+}
+
+const resetActiveState = () => {
+    activeState.conversationId = null;
+    activeState.eventSocket = null;
+    activeState.eventAbort = null;
+    activeState.chatroom = null;
+    activeState.agentsConfig = null;
+    activeState.toolRegistry = null;
+};
+
+const broadcastEvent = (agentName, eventType, eventId, data) => { 
+    activeState.eventSocket.emit(eventType, { agentName, eventId, data }) 
+};
+
+const getToolHandler = (toolName, registry) => { 
+    return registry[toolName]?.handler || null 
+};
 
 const parseToolArguments = (rawArgs) => {
     let args = {};
@@ -44,7 +66,7 @@ const parseToolArguments = (rawArgs) => {
 };
 
 const checkAbort = () => {
-    if (eventAbort?.aborted) {
+    if (activeState.eventAbort?.aborted) {
         throw new DOMException('The operation was aborted.', 'AbortError');
     }
 };
@@ -104,6 +126,20 @@ const calculateTrustScore = (anchorData, verifierTrust, consistency) => {
 
     return Number(baseScore.toFixed(3));
 };
+
+const getPromptEmbeddings = async (prompt) => {
+    try {
+        const embeddings = await withRetry(async () => (await ollama.embed({ 
+            model : summaryDefinitions.embed_model.model, 
+            input : [ prompt ],
+            options: summaryDefinitions.embed_model.options
+        })).embeddings[0]);
+
+        return embeddings;
+    } catch (error) {
+        return [];
+    }
+}
 
 const getContextSummary = async (type, context, agentName) => {
     const selectedSumType = summaryDefinitions[type];
@@ -219,7 +255,7 @@ const getVerificationSummary = async (context, agentName, anchorData) => {
 };
 
 const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult = null) => {
-    const summaryContext = ctxManager.getContextMessages(messages, true, isLast);
+    const summaryContext = await ctxManager.getContextMessages(messages, true, isLast);
     const modelSummaryContext = JSON.stringify(stripEventIds(summaryContext));
 
     const denseSummaryObject = await getContextSummary('dense_summary', modelSummaryContext, agentName);
@@ -271,7 +307,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult
     const anchorTrustScore = calculateTrustScore(fullAnchorData, verifierTrustScore, consistency);
 
     if (anchorTrustScore >= 50) {
-        const { anchorId, anchorStatus, anchorTime, resolutionAnchor } = ctxManager.addAnchor(
+        const { anchorId, anchorStatus, anchorTime, resolutionAnchor } = await ctxManager.addAnchor(
             anchorTrustScore, isLast, {
                 dense : {
                     summary : denseSummaryObject,
@@ -300,7 +336,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult
 
         messages.push({role: 'system', eventId: `ctx-${anchorId}`, content:finalInjection});
 
-        const prunedMessages = ctxManager.getContextMessages(messages, false, isLast);
+        const prunedMessages = await ctxManager.getContextMessages(messages, false, isLast);
 
         broadcastEvent('ctx-manager', 'anchor-create', crypto.randomUUID(), {
             agent : agentName, 
@@ -309,7 +345,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult
 
         return prunedMessages;
     } else {
-        const prunedMessages = ctxManager.getContextMessages(messages, false, isLast);
+        const prunedMessages = await ctxManager.getContextMessages(messages, false, isLast);
 
         broadcastEvent('ctx-manager', 'anchor-skip', crypto.randomUUID(), agentName);
 
@@ -318,22 +354,35 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult
 };
 
 const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
-    const selectedConfig = agentsConfig[agentName];
+    const selectedConfig = activeState.agentsConfig[agentName];
 
-    const agentTools = selectedConfig.tools.map(name => toolRegistry[name]?.definition).filter(Boolean);
+    const agentTools = selectedConfig.tools.map(name => activeState.toolRegistry[name]?.definition).filter(Boolean);
 
-    const ctxManager = new ContextManager(agentName, userAlias, conversationFolder, selectedConfig.system, userPrompt, toolHeader);
+    const starterEmbeddings = await getPromptEmbeddings(userPrompt);
+
+    const ctxManager = await ContextManager.init(
+        'mongodb://127.0.0.1:32771/?directConnection=true',
+        4096,
+        `${agentName}-${userAlias}-${activeState.conversationId}`,
+        agentName, 
+        userAlias, 
+        activeState.conversationId, 
+        selectedConfig.system, 
+        userPrompt, 
+        toolHeader,
+        starterEmbeddings
+    );
 
     let iteration = 0;
-    let messages = ctxManager.getStarterContext();
+    let messages = await ctxManager.getContextMessages(null, false, false);
 
-    while (iteration < agentsConfig[agentName].maxIterations) {
+    while (iteration < activeState.agentsConfig[agentName].maxIterations) {
         checkAbort();
 
         iteration++;
         const result = await withRetry(async () => ollama.chat({
-            model: agentsConfig[agentName].model,
-            options: agentsConfig[agentName].options,
+            model: activeState.agentsConfig[agentName].model,
+            options: activeState.agentsConfig[agentName].options,
             messages: stripEventIds(messages),
             tools: agentTools,
             think: true,
@@ -375,7 +424,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         }
 
         if (currentContextSize) {
-            contextFillPct = Number(((currentContextSize / agentsConfig[agentName].options.num_ctx) * 100).toFixed(3));
+            contextFillPct = Number(((currentContextSize / activeState.agentsConfig[agentName].options.num_ctx) * 100).toFixed(3));
 
             broadcastEvent('system', 'context-capacity', crypto.randomUUID(), {
                 fill_pct : contextFillPct,
@@ -408,10 +457,10 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
                     arguments : args
                 });
 
-                const handler = getToolHandler(functionName, toolRegistry);
+                const handler = getToolHandler(functionName, activeState.toolRegistry);
 
                 if (handler) {
-                    const toolResult = await handler(args, { agentName, chatroom });
+                    const toolResult = await handler(args, { agentName, chatroom : activeState.chatroom });
 
                     messages.push({ 
                         role: 'tool', 
@@ -461,17 +510,9 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
 };
 
 export const startConversation = async (convId, userPrompt, userAlias, eSckt, signal) => {
-    const convFolder = path.join(stateFolder, `conv_${convId}`);
-    if (!fs.existsSync(convFolder)) fs.mkdirSync(convFolder);
+    await setActiveState(convId, eSckt, signal);
 
-    eventSocket = eSckt;
-    eventAbort = signal;
-    conversationFolder = convFolder;
-
-    chatroom = new Chatroom(convFolder);
-    toolRegistry = await createToolRegistry(runAgent, agentsConfig, inputStore);
-
-    const totalLeaders = Object.entries(agentsConfig).filter(([_, cfg]) => cfg.isLeader);
+    const totalLeaders = Object.entries(activeState.agentsConfig).filter(([_, cfg]) => cfg.isLeader);
 
     if (totalLeaders.length !== 1) throw new Error(`Exactly one leader needed. Found: ${totalLeaders.length}`);
 
@@ -497,12 +538,17 @@ export const startConversation = async (convId, userPrompt, userAlias, eSckt, si
             runtime : duration
         });
 
+        resetActiveState();
+
         return { success : true };
     }
     catch (error) { 
+        resetActiveState();
+
         if (error.name === 'AbortError') {
             return { success: true, aborted: true };
         }
+
         return { success : false, error } 
     }
 };

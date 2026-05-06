@@ -2,24 +2,27 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 
-export class ContextManager {
-    #agentName; #master;
-    #maxRecentTurns; #maxAnchors;
-    #anchorSeq; #anchors;
-    #startingAnchor; #prevUserQuery;
-    #systemDirectives; #pinnedUserIntent; #pinnedToolHeader;
-    #keywordConfig;
-    #anchorsFile; #contextFolder;
+import { AnchorStore } from './anchorStore.js';
+import { ContextStore } from './contextStore.js';
 
-    constructor(agentName, master, conversationFolder, sysDir, userInt, toolHead, maxRecentTurns = 25, maxAnchors = 10) {
+export class ContextManager {
+    #agentName; #master; #convId;
+    #systemDirectives; #pinnedUserIntent; #pinnedToolHeader;
+    #maxRecentTurns; #maxAnchors;
+    #anchorSeq; #startingAnchor;
+    #anchorStore; #contextStore;
+    #startingEmbed; #startingKeywords;
+    #prevUserQuery; #keywordConfig;
+
+    constructor(agentName, master, convId, sysDir, userInt, toolHead, seq, startEmbed, stores) {
         this.#agentName = agentName;
         this.#master = master;
+        this.#convId = convId;
 
-        this.#maxRecentTurns = maxRecentTurns;
-        this.maxAnchors = maxAnchors;
+        this.#maxRecentTurns = 25;
+        this.maxAnchors = 10;
 
-        this.#anchorSeq = 0;
-        this.#anchors = [];
+        this.#anchorSeq = seq;
 
         this.#startingAnchor = null;
         this.#prevUserQuery = null;
@@ -27,6 +30,11 @@ export class ContextManager {
         this.#systemDirectives = sysDir;
         this.#pinnedUserIntent = userInt;
         this.#pinnedToolHeader = toolHead;
+
+        this.#startingEmbed = startEmbed;
+
+        this.#anchorStore = stores.anchorStore;
+        this.#contextStore = stores.contextStore;
 
         this.#keywordConfig = {
             minWordLength: 3,
@@ -45,90 +53,89 @@ export class ContextManager {
         const systemBoostTerms = this.#extractKeyTerms();
         this.#addBoostTerms(systemBoostTerms);
 
-        const anchorsFolder = path.join(conversationFolder, 'anchors');
-        if (!fs.existsSync(anchorsFolder)) fs.mkdirSync(anchorsFolder);
-
-        this.#anchorsFile = path.join(anchorsFolder, `${this.#agentName}.json`);
-
-        const contextFolder = path.join(conversationFolder, 'context');
-        if (!fs.existsSync(contextFolder)) fs.mkdirSync(contextFolder);
-
-        const agentCtxFolder = path.join(contextFolder, this.#agentName);
-        if (!fs.existsSync(agentCtxFolder)) fs.mkdirSync(agentCtxFolder);
-
-        this.#contextFolder = agentCtxFolder;
-
-        this.#loadAnchors();
+        this.#startingKeywords = this.#extractKeywords(this.#pinnedUserIntent);
     }
 
-    #loadAnchors() {
-        try {
-            const data = fs.readFileSync(this.#anchorsFile, 'utf8');
-            const anchorData = JSON.parse(data);
-            this.#anchors = anchorData.anchors;
-            this.#anchorSeq = anchorData.anchorSeq;
-        } catch (err) {
-            this.#anchors = [];
-            this.#anchorSeq = 0;
-        }
+    static async init(dbUrl, embedDim, collectionName, agentName, master, convId, sysDir, userInt, toolHead, startEmbed) {
+        const contextStore = new ContextStore(dbUrl, collectionName);
+        const anchorStore = new AnchorStore(dbUrl, embedDim, collectionName);
+
+        await contextStore.init();
+
+        await anchorStore.init();
+        const anchorSeq = await anchorStore.getCurrentSequenceId();
+
+        const returnCtxManager = new ContextManager(
+            agentName, master, convId, sysDir, userInt, toolHead, 
+            anchorSeq, startEmbed, { contextStore, anchorStore }
+        );
+
+        return returnCtxManager;
     }
 
-    #saveAnchors() {
-        const saveObj = {
-            anchorSeq: this.#anchorSeq,
-            anchors: this.#anchors
-        };
-        try {
-            fs.writeFileSync(this.#anchorsFile, JSON.stringify(saveObj, null, 2), 'utf8');
-        } catch (err) {}
-    }
+    #extractKeyTerms() {
+        const text = `
+            ${this.#master.toLowerCase()}
+            ${this.#agentName.toLowerCase()}
+            ${this.#systemDirectives.toLowerCase()}
+            ${this.#pinnedToolHeader.toLowerCase()}
+            ${this.#pinnedUserIntent.toLowerCase()}
+        `;
 
-    #saveContext(latestContext) {
-        const agentContextSpace = {
-            csId: crypto.randomUUID(),
-            lastQuery: this.#pinnedUserIntent,
-            contextSpace: latestContext
-        };
+        const tokens = text
+            .replace(/[^\w\s'-]/g, ' ')
+            .split(/\s+/)
+            .map(t => t.trim())
+            .filter(t => t.length >= 4);
 
-        const fileName = `${this.#master}-${this.#agentName}.json`;
-        const fileToWrite = path.join(this.#contextFolder, fileName);
+        const candidates = new Set();
 
-        try {
-            fs.writeFileSync(fileToWrite, JSON.stringify(agentContextSpace, null, 2), 'utf8');
-        } catch (err) {}
-    }
-
-    #extractCurrentAnchorStatus(str) {
-        const regex = /\[CTX_ANC_(\d+)\|STATUS:([A-Z_]+)\|RES_ANC:([A-Z0-9-]+)\|/;
-        const match = str.match(regex);
-        if (!match) return null;
-        return {
-            anchorId: match[1],
-            status: match[2],
-            resolutionAnchor: match[3]
-        };
-    }
-
-    #resolveActiveAnchors() {
-        if (!this.#startingAnchor) return;
-
-        const startIndex = this.#startingAnchor - 1;
-        if (startIndex < 0 || startIndex >= this.#anchors.length) {
-            this.#saveAnchors();
-            return;
+        for (let i = 0; i < tokens.length; i++) {
+            if (tokens[i].length >= 5) {
+                candidates.add(tokens[i]);
+            }
+            if (i < tokens.length - 1) {
+                const bigram = `${tokens[i]} ${tokens[i + 1]}`;
+                if (bigram.length >= 8) {
+                    candidates.add(bigram);
+                }
+            }
         }
 
-        const anchorsToUpdate = this.#anchors.slice(startIndex);
+        const scored = Array.from(candidates).map(term => {
+            const words = term.split(' ');
+            let score = words.length;
 
-        for (const anc of anchorsToUpdate) {
-            anc.status = 'RESOLVED';
-            anc.resolutionAnchor = this.#anchorSeq;
+            if (term.length > 12) score += 2;
+            if (words.length === 2) score += 1.5;
+
+            const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`\\b${escapedTerm.replace(/ /g, '\\s+')}\\b`, 'g');
+            const occurrences = (text.match(regex) || []).length;
+
+            if (occurrences > 1) score += 3;
+
+            const generic = new Set(['your', 'task', 'role', 'you', 'will', 'must', 'should', 'can', 'help', 'user', 'respond']);
+            if (words.some(w => generic.has(w))) score -= 1.5;
+
+            return { term, score };
+        });
+
+        return scored
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 12)
+            .map(item => item.term);
+    }
+
+    #addBoostTerms(terms) {
+        if (!terms) return;
+        if (Array.isArray(terms)) {
+            terms.forEach(term => {
+                if (term) this.#keywordConfig.boostTerms.add(term.toLowerCase().trim());
+            });
+        } else if (typeof terms === 'string') {
+            this.#keywordConfig.boostTerms.add(terms.toLowerCase().trim());
         }
-
-        this.#anchors.length = startIndex;
-        this.#anchors.push(...anchorsToUpdate);
-
-        this.#saveAnchors();
     }
 
     #generateNGrams(text) {
@@ -207,6 +214,35 @@ export class ContextManager {
         }).sort((a, b) => b.score - a.score);
     }
 
+    #rerankRecalledKeywords(recalledKwList, currentText) {
+        if (!recalledKwList?.length) return [];
+
+        let candidates = recalledKwList
+            .filter(kw => kw && kw.length >= this.#keywordConfig.minWordLength)
+            .filter(kw => !this.#keywordConfig.coreStopWords.has(kw.toLowerCase()));
+
+        const scored = this.#scoreKeywords(candidates, currentText.toLowerCase().trim());
+
+        const finalScored = scored.map(item => {
+            let score = item.score;
+
+            if (this.#keywordConfig.boostTerms.has(item.phrase)) {
+                score *= 2.5;
+            }
+
+            if (this.#countOccurrences(this.#pinnedUserIntent.toLowerCase(), item.phrase) > 0) {
+                score *= 1.8;
+            }
+
+            return { ...item, score: Number(score.toFixed(4)) };
+        });
+
+        return finalScored
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 10)
+            .map(item => item.phrase);
+    }
+
     #extractKeywords(text) {
         if (!text || typeof text !== 'string' || text.trim().length < 8) {
             return [];
@@ -245,69 +281,45 @@ export class ContextManager {
         return crypto.createHash('sha256').update(contentForHash).digest('hex').slice(0, 16);
     }
 
-    #extractKeyTerms() {
-        const text = `
-            ${this.#master.toLowerCase()}
-            ${this.#agentName.toLowerCase()}
-            ${this.#systemDirectives.toLowerCase()}
-            ${this.#pinnedToolHeader.toLowerCase()}
-            ${this.#pinnedUserIntent.toLowerCase()}
-        `;
-
-        const tokens = text
-            .replace(/[^\w\s'-]/g, ' ')
-            .split(/\s+/)
-            .map(t => t.trim())
-            .filter(t => t.length >= 4);
-
-        const candidates = new Set();
-
-        for (let i = 0; i < tokens.length; i++) {
-            if (tokens[i].length >= 5) {
-                candidates.add(tokens[i]);
-            }
-            if (i < tokens.length - 1) {
-                const bigram = `${tokens[i]} ${tokens[i + 1]}`;
-                if (bigram.length >= 8) {
-                    candidates.add(bigram);
-                }
-            }
-        }
-
-        const scored = Array.from(candidates).map(term => {
-            const words = term.split(' ');
-            let score = words.length;
-
-            if (term.length > 12) score += 2;
-            if (words.length === 2) score += 1.5;
-
-            const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(`\\b${escapedTerm.replace(/ /g, '\\s+')}\\b`, 'g');
-            const occurrences = (text.match(regex) || []).length;
-
-            if (occurrences > 1) score += 3;
-
-            const generic = new Set(['your', 'task', 'role', 'you', 'will', 'must', 'should', 'can', 'help', 'user', 'respond']);
-            if (words.some(w => generic.has(w))) score -= 1.5;
-
-            return { term, score };
-        });
-
-        return scored
-            .sort((a, b) => b.score - a.score)
-            .slice(0, 12)
-            .map(item => item.term);
+    #extractCurrentAnchorStatus(str) {
+        const regex = /\[CTX_ANC_(\d+)\|STATUS:([A-Z_]+)\|RES_ANC:([A-Z0-9-]+)\|/;
+        const match = str.match(regex);
+        if (!match) return null;
+        return {
+            anchorId: match[1],
+            status: match[2],
+            resolutionAnchor: match[3]
+        };
     }
 
-    #addBoostTerms(terms) {
-        if (!terms) return;
-        if (Array.isArray(terms)) {
-            terms.forEach(term => {
-                if (term) this.#keywordConfig.boostTerms.add(term.toLowerCase().trim());
-            });
-        } else if (typeof terms === 'string') {
-            this.#keywordConfig.boostTerms.add(terms.toLowerCase().trim());
-        }
+    #buildContextSpace(recent, memories = null, keywords = null) {
+        const sysCoreMessage = `
+            SYSTEM DIRECTIVES (High priority):
+            ${this.#systemDirectives}
+            ${this.#pinnedToolHeader}
+
+            MISSION / TASK / USER INTENT (High priority):
+            ${this.#prevUserQuery ? `Previous user query: ${this.#prevUserQuery}` : ''}
+            ${`Current user query: ${this.#pinnedUserIntent}`}
+
+            ${keywords ? 'ACTIVE TOPICS / RELEVANT KEYWORDS:' : ''}
+            ${keywords ? keywords.join(' - ') : ''}
+
+            ${memories ? 'RECALLED MEMORIES / HISTORICAL ANCHORS:' : ''}
+            ${memories ? memories.join('\n') : ''}
+
+            Most recent context anchor available: ${this.#anchorSeq}
+            Use any context anchors provided by the system to traverse and confirm the conversation flow.
+
+            UNCOMPRESSED LATEST CONVERSATION MESSAGES:
+        `;
+
+        const curatedContext = [
+            { role : 'system', eventId : 'SYS-CORE', content : sysCoreMessage }, 
+            ...recent
+        ];
+
+        return curatedContext;
     }
 
     extractAnchorFeatures(context, embeddingData, summaryData) {
@@ -345,7 +357,7 @@ export class ContextManager {
         };
     }
 
-    addAnchor(trustScore, isLast, summaryData, rawData, result = null) {
+    async addAnchor(trustScore, isLast, summaryData, rawData, result = null) {
         this.#anchorSeq++;
 
         if (!this.#startingAnchor) this.#startingAnchor = this.#anchorSeq;
@@ -354,39 +366,39 @@ export class ContextManager {
         const anchorStatus = isLast ? 'RESOLVED' : 'ACTIVE';
         const resolutionPointer = isLast ? this.#anchorSeq : null;
 
-        const entry = {
-            id: this.#anchorSeq,
-            timestamp: anchorCreateTime,
-            status: anchorStatus,
-            trustScore: Math.max(0, Math.min(100, trustScore)),
-            isResolver: isLast,
-            resolutionAnchor: resolutionPointer,
-            queryAndResult: isLast ? { query: this.#pinnedUserIntent, result } : null,
+        await this.#anchorStore.insertAnchor({
+            sequenceId : this.#anchorSeq,
+            status : anchorStatus,
+            trustScore : Math.max(0, Math.min(100, trustScore)),
 
-            summaryData: {
-                dense: {
-                    summary: summaryData.dense.summary,
-                    hash: this.#hashContent(summaryData.dense.summary),
-                    keywords: summaryData.dense.keywords,
-                    embeddings: summaryData.dense.embeddings
+            resolverData : {
+                isResolver: isLast,
+                resolutionAnchor: resolutionPointer,
+                queryAndResult: isLast ? { query: this.#pinnedUserIntent, result } : null,
+            },
+
+            summaryData : {
+                dense : { 
+                    hash : this.#hashContent(summaryData.dense.summary),
+                    contentObj : summaryData.dense.summary
                 },
-                trajectory: {
-                    summary: summaryData.trajectory.summary,
-                    hash: this.#hashContent(summaryData.trajectory.summary),
-                    keywords: summaryData.trajectory.keywords,
-                    embeddings: summaryData.trajectory.embeddings
+
+                trajectory : {
+                   hash :  this.#hashContent(summaryData.trajectory.summary),
+                   contentObj : summaryData.trajectory.summary
                 }
             },
 
-            rawData: {
-                turns: rawData.turns,
-                keywords: rawData.keywords,
-                embeddings: rawData.embeddings
-            }
-        };
-
-        this.#anchors.push(entry);
-        this.#saveAnchors();
+            rawTurns : rawData.turns
+        }, {
+            dense : summaryData.dense.keywords,
+            trajectory : summaryData.trajectory.keywords,
+            raw : rawData.keywords
+        }, {
+            dense : summaryData.dense.embeddings,
+            trajectory : summaryData.trajectory.embeddings,
+            raw : rawData.embeddings
+        })
 
         return {
             anchorId: this.#anchorSeq,
@@ -396,83 +408,68 @@ export class ContextManager {
         };
     }
 
-    getStarterContext() {
-        let startingContext = null;
-
-        try {
-            const fileName = `${this.#master}-${this.#agentName}.json`;
-            const fileToRead = path.join(this.#contextFolder, fileName);
-            const data = fs.readFileSync(fileToRead, 'utf8');
-            startingContext = JSON.parse(data);
-        } catch (err) {
-            startingContext = null;
-        }
-
-        if (!startingContext) {
-            return this.getContextMessages(null, false, false);
-        }
-
-        const restoredContext = startingContext.contextSpace;
-        this.#prevUserQuery = startingContext.lastQuery;
-
-        restoredContext.push({
-            role: 'user',
-            eventId: crypto.randomUUID(),
-            content: this.#pinnedUserIntent
-        });
-
-        return this.getContextMessages(restoredContext, false, false);
-    }
-
-    getContextMessages(fullMessages, isSummary = false, isLast = false) {
+    async getContextMessages(fullMessages, isSummary = false, isLast = false) {
         if (isSummary) {
-            const fullPurgedMessages = fullMessages.filter(msg => {
-                if (msg?.eventId === 'SYS-CORE' || msg?.eventId === 'SYS-MEM' || msg?.eventId?.includes('ctx-')) {
-                    return false;
-                }
-                return true;
-            });
-            return fullPurgedMessages.slice(-this.#maxRecentTurns);
-        }
+            const fullPurgedMessages = fullMessages.filter(msg => msg.eventId !== 'SYS-CORE' && !(msg.eventId.includes('ctx-')));
 
-        const starterCore = {
-            role: 'system',
-            eventId: 'SYS-CORE',
-            content: `SYS-REMINDER:\n${this.#systemDirectives}\n${this.#pinnedToolHeader}${this.#prevUserQuery ? `\nPrevious user query:${this.#prevUserQuery}` : ''}\nCurrent user query:\n${this.#pinnedUserIntent}`
+            const nameMappedMessages = fullPurgedMessages.slice(-this.#maxRecentTurns).map(msg => {
+                if (msg.role === 'user' || msg.role === 'assistant') {
+                    return {
+                        name : msg.role === 'user' ? this.#master : this.#agentName,
+                        ...JSON.parse(JSON.stringify(msg))
+                    }
+                }
+
+                return msg;
+            });
+
+            return nameMappedMessages;
         };
 
         if (!fullMessages) {
-            return [
-                starterCore,
-                {
-                    role: 'user',
-                    eventId: crypto.randomUUID(),
-                    content: this.#pinnedUserIntent
-                }
-            ];
+            const restoredContext = await this.#contextStore.getLastSnapshot();
+
+            if (!restoredContext.context || restoredContext.context?.length < 1 ) {
+                return [
+                    { role : 'system', eventId : 'SYS-CORE', content : `${this.#systemDirectives}\n${this.#pinnedToolHeader}` },
+                    { role : 'user', eventId : crypto.randomUUID(), content : this.#pinnedUserIntent }
+                ]
+            }
+
+            if (restoredContext.lastQuery) this.#prevUserQuery = restoredContext.lastQuery;
+
+            fullMessages = restoredContext.context;
+            fullMessages.push({ role : 'user', eventId : crypto.randomUUID(), content : this.#pinnedUserIntent })
         }
 
-        const sysPurgedMessages = fullMessages.filter(msg => {
-            if (msg?.eventId === 'SYS-CORE' || msg?.eventId === 'SYS-MEM') return false;
-            return true;
-        });
+        if (isLast) await this.#anchorStore.resolveActiveAnchors(this.#startingAnchor, this.#anchorSeq);
 
-        const recent = sysPurgedMessages.slice(-this.#maxRecentTurns);
+        fullMessages = fullMessages.filter(msg => msg.eventId !== 'SYS-CORE');
 
-        const visibleAnchorIds = recent
-            .filter(x => x.eventId.includes('ctx-'))
-            .map(i => Number(i.eventId.slice(4)));
+        const anchorCount = () => fullMessages.filter(x => x.eventId.includes('ctx-')).length;
+        const speakersCount = () => fullMessages.filter(x => x.role === 'user' || x.role === 'assistant').length;
 
-        const historyOnlyAnchors = this.#anchors.filter(a => !visibleAnchorIds.includes(a.id));
-        const currentAnchorHistory = historyOnlyAnchors.slice(-this.maxAnchors);
+        while (anchorCount() > this.#maxAnchors || speakersCount() > this.#maxRecentTurns) {
+            const newMsgChunk = fullMessages.shift();
 
-        if (isLast) this.#resolveActiveAnchors();
+            const chunkKeywords = this.#extractKeywords(
+                `${newMsgChunk.content ? newMsgChunk.content : ''} ${newMsgChunk.thinking ? newMsgChunk.thinking : ''}`
+            );
 
-        for (const msg of recent) {
+            this.#addBoostTerms(chunkKeywords);
+        }
+
+        const visibleAnchorIds = fullMessages.filter(x => x.eventId.includes('ctx-')).map(i => Number(i.eventId.slice(4)));
+
+        const actualAnchorStatus = await this.#anchorStore.getAnchorStatus(visibleAnchorIds);
+
+        for (const msg of fullMessages) {
             if (msg.eventId.includes('ctx-')) {
                 const anchorInfo = this.#extractCurrentAnchorStatus(msg.content);
+                
                 if (anchorInfo && anchorInfo.anchorId) {
-                    const actualAnchorData = this.#anchors[anchorInfo.anchorId - 1];
+                    const actualAnchorData = actualAnchorStatus[anchorInfo.anchorId];
+
                     if (actualAnchorData && anchorInfo.status !== actualAnchorData.status) {
                         msg.content = msg.content.replace(
                             `STATUS:${anchorInfo.status}|RES_ANC:${anchorInfo.resolutionAnchor}`,
@@ -481,19 +478,39 @@ export class ContextManager {
                     }
                 }
             }
+        };
+
+        let curatedContext;
+
+        const recalledAnchors = await this.#anchorStore.searchAnchors(this.#startingEmbed, this.#startingKeywords);
+
+        if (recalledAnchors.length > 0) {
+            const relevantMemories = recalledAnchors.map((m) => {
+                const resAnc = !m.resolverData.resolutionAnchor ? '-' : `A${m.resolverData.resolutionAnchor}`
+                const compactTimeStamp = (new Date(m.created).toLocaleString()).replaceAll(' ', '');
+
+                const { U, S, P, T } = m.summary;
+
+                return `[CTX_ANC_${m.id}|STATUS:${m.status}|RES_ANC:${resAnc}|SYS_TIME:${compactTimeStamp}]=[U:${U}][S:${S}][P:${P}][T:${T}]`;
+            });
+
+            const allRecalledKeywords = [...new Set((recalledAnchors.map(m => m.keywords)).flat())];
+
+            const currentQueryText = this.#pinnedUserIntent + (this.#prevUserQuery ? ` ${this.#prevUserQuery}` : '');
+
+            const relevantKeywords = this.#rerankRecalledKeywords(allRecalledKeywords, currentQueryText);
+
+            curatedContext = this.#buildContextSpace(fullMessages, relevantMemories, relevantKeywords);
+        } else {
+            curatedContext = this.#buildContextSpace(fullMessages, null, null);
         }
 
-        const memoryContent = `[CTX_MEM:${this.#agentName} PRI:1U 2S 3A. ID route only] ` +
-            currentAnchorHistory.map(a => `A${a.id}(${a.trustScore}):${JSON.stringify(a.summaryData?.dense?.summary || {})}`).join('|');
-
-        const memoryAwareness = { role: 'system', eventId: 'SYS-MEM', content: memoryContent };
-
-        const curatedContext = currentAnchorHistory.length > 0
-            ? [starterCore, memoryAwareness, ...recent]
-            : [starterCore, ...recent];
-
-        this.#saveContext(curatedContext);
+        await this.#contextStore.newSnapshot(curatedContext, {
+            lastQuery : this.#pinnedUserIntent
+        });
 
         return curatedContext;
     }
 }
+
+// await testStore.close();
