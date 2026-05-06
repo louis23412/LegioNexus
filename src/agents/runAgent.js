@@ -500,11 +500,15 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
 
             await getCtxUpdate(agentName, messages, ctxManager, true, assistantMessage.content.trim());
 
+            await ctxManager.close();
+
             return { content: assistantMessage.content.trim() };
         }
 
         break;
     }
+
+    await ctxManager.close();
 
     return { content: `[${agentName}] Max iterations.` };
 };

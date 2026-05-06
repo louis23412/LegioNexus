@@ -73,6 +73,13 @@ export class ContextManager {
         return returnCtxManager;
     }
 
+    async close() {
+        try {
+            if (this.#anchorStore) await this.#anchorStore.close();
+            if (this.#contextStore) await this.#contextStore.close();  
+        } catch (e) {}
+    }
+
     #extractKeyTerms() {
         const text = `
             ${this.#master.toLowerCase()}
@@ -512,5 +519,3 @@ export class ContextManager {
         return curatedContext;
     }
 }
-
-// await testStore.close();
