@@ -40,6 +40,11 @@ export class AnchorStore {
                         numDimensions: this.#numDimensions,
                         similarity: 'cosine',
                         quantization: 'scalar'
+                    },
+
+                    {
+                        type: 'filter',
+                        path: 'sequenceId'
                     }
                 ]
             }
@@ -52,6 +57,8 @@ export class AnchorStore {
                 mappings: {
                     dynamic: false,
                     fields: {
+                        sequenceId: { type: "number" },
+
                         dense_keywords: [
                             {
                                 type: "token",
@@ -185,7 +192,7 @@ export class AnchorStore {
     }
 
     async insertAnchor(anchorData, keywordData, embeddingData) {
-        const nowDate = new Date()
+        const nowDate = new Date();
 
         const document = {
             createdAt: nowDate,
@@ -204,7 +211,7 @@ export class AnchorStore {
 
         const result = await this.#dbCollection.insertOne(document);
 
-        return result.insertedId;
+        return nowDate;
     }
 
     async searchAnchors(queryEmbedding, keywords, options = {}) {
@@ -217,8 +224,9 @@ export class AnchorStore {
 
         const {
             limit = 15,
-            numCandidates = 400,
+            numCandidates = 500,
             minHybridScore = 0,
+            maxSequenceId = null,
             weights = {
                 denseVector: 0.40,
                 trajectoryVector: 0.30,
@@ -312,9 +320,15 @@ export class AnchorStore {
                 }
             },
 
+            ...(maxSequenceId !== null 
+                ? [{ $match: { sequenceId: { $lt: maxSequenceId } } }] 
+                : []
+            ),
+
             { $match: { hybridScore: { $gte: minHybridScore } } },
-            { $sort: { sequenceId: 1 } },
+            { $sort: { hybridScore: -1 } },
             { $limit: limit },
+            { $sort: { sequenceId: 1 } },
 
             {
                 $project: {

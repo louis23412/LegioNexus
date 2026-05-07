@@ -361,7 +361,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
     const starterEmbeddings = await getPromptEmbeddings(userPrompt);
 
     const ctxManager = await ContextManager.init(
-        'mongodb://127.0.0.1:32771/?directConnection=true',
+        'mongodb://0.0.0.0:60666/?directConnection=true',
         4096,
         `${agentName}-${userAlias}-${activeState.conversationId}`,
         agentName, 

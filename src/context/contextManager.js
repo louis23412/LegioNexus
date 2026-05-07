@@ -8,7 +8,7 @@ import { ContextStore } from './contextStore.js';
 export class ContextManager {
     #agentName; #master; #convId;
     #systemDirectives; #pinnedUserIntent; #pinnedToolHeader;
-    #maxRecentTurns; #maxAnchors;
+    #maxRecentTurns; #maxVisibleAnchors; #maxMemoryAnchors;
     #anchorSeq; #startingAnchor;
     #anchorStore; #contextStore;
     #startingEmbed; #startingKeywords;
@@ -20,7 +20,8 @@ export class ContextManager {
         this.#convId = convId;
 
         this.#maxRecentTurns = 25;
-        this.maxAnchors = 10;
+        this.#maxVisibleAnchors = 10;
+        this.#maxMemoryAnchors = 5;
 
         this.#anchorSeq = seq;
 
@@ -299,6 +300,33 @@ export class ContextManager {
         };
     }
 
+    #sanitizeText(text) {
+        if (!text || typeof text !== 'string') {
+            return '';
+        }
+
+        let cleaned = text;
+
+        cleaned = cleaned.replace(/[\s\uFEFF\xA0\u2028\u2029]+/g, ' ');
+
+        cleaned = cleaned.replace(/([.!?])\s+/g, '$1\n\n');
+
+        cleaned = cleaned
+            .replace(/\s+([A-Z][A-Z\s\/&-]{4,}?(?:\s+[A-Z][A-Z0-9\s\/&-]*?)?)\s*[:)]\s*/g, '\n\n$1:\n')
+            .replace(/\s*[-•*]\s+/g, '\n- ')
+            .replace(/\s*(\d+\.)\s+/g, '\n$1 ');
+
+        cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+
+        cleaned = cleaned
+            .split('\n')
+            .map(line => line.trim())
+            .join('\n')
+            .replace(/\n{3,}/g, '\n\n');
+
+        return cleaned.trim();
+    }
+
     #buildContextSpace(recent, memories = null, keywords = null) {
         const sysCoreMessage = `
             SYSTEM DIRECTIVES (High priority):
@@ -324,7 +352,12 @@ export class ContextManager {
         const curatedContext = [
             { role : 'system', eventId : 'SYS-CORE', content : sysCoreMessage }, 
             ...recent
-        ];
+        ].map((m) => {
+            if (m.content) m.content = this.#sanitizeText(m.content);
+            if (m.thinking) m.thinking = this.#sanitizeText(m.thinking);
+
+            return m;
+        });
 
         return curatedContext;
     }
@@ -369,11 +402,10 @@ export class ContextManager {
 
         if (!this.#startingAnchor) this.#startingAnchor = this.#anchorSeq;
 
-        const anchorCreateTime = Date.now();
         const anchorStatus = isLast ? 'RESOLVED' : 'ACTIVE';
         const resolutionPointer = isLast ? this.#anchorSeq : null;
 
-        await this.#anchorStore.insertAnchor({
+        const anchorCreateTime = await this.#anchorStore.insertAnchor({
             sequenceId : this.#anchorSeq,
             status : anchorStatus,
             trustScore : Math.max(0, Math.min(100, trustScore)),
@@ -405,7 +437,7 @@ export class ContextManager {
             dense : summaryData.dense.embeddings,
             trajectory : summaryData.trajectory.embeddings,
             raw : rawData.embeddings
-        })
+        });
 
         return {
             anchorId: this.#anchorSeq,
@@ -430,7 +462,12 @@ export class ContextManager {
                 return msg;
             });
 
-            return nameMappedMessages;
+            return nameMappedMessages.map((m) => {
+                if (m.content) m.content = this.#sanitizeText(m.content);
+                if (m.thinking) m.thinking = this.#sanitizeText(m.thinking);
+
+                return m;
+            });
         };
 
         if (!fullMessages) {
@@ -438,15 +475,15 @@ export class ContextManager {
 
             if (!restoredContext.context || restoredContext.context?.length < 1 ) {
                 return [
-                    { role : 'system', eventId : 'SYS-CORE', content : `${this.#systemDirectives}\n${this.#pinnedToolHeader}` },
-                    { role : 'user', eventId : crypto.randomUUID(), content : this.#pinnedUserIntent }
+                    { role : 'system', eventId : 'SYS-CORE', content : this.#sanitizeText(`${this.#systemDirectives}\n${this.#pinnedToolHeader}`) },
+                    { role : 'user', eventId : crypto.randomUUID(), content : this.#sanitizeText(this.#pinnedUserIntent) }
                 ]
             }
 
             if (restoredContext.lastQuery) this.#prevUserQuery = restoredContext.lastQuery;
 
             fullMessages = restoredContext.context;
-            fullMessages.push({ role : 'user', eventId : crypto.randomUUID(), content : this.#pinnedUserIntent })
+            fullMessages.push({ role : 'user', eventId : crypto.randomUUID(), content : this.#sanitizeText(this.#pinnedUserIntent) })
         }
 
         if (isLast) await this.#anchorStore.resolveActiveAnchors(this.#startingAnchor, this.#anchorSeq);
@@ -456,7 +493,7 @@ export class ContextManager {
         const anchorCount = () => fullMessages.filter(x => x.eventId.includes('ctx-')).length;
         const speakersCount = () => fullMessages.filter(x => x.role === 'user' || x.role === 'assistant').length;
 
-        while (anchorCount() > this.#maxAnchors || speakersCount() > this.#maxRecentTurns) {
+        while (anchorCount() > this.#maxVisibleAnchors || speakersCount() > this.#maxRecentTurns) {
             const newMsgChunk = fullMessages.shift();
 
             const chunkKeywords = this.#extractKeywords(
@@ -489,7 +526,10 @@ export class ContextManager {
 
         let curatedContext;
 
-        const recalledAnchors = await this.#anchorStore.searchAnchors(this.#startingEmbed, this.#startingKeywords);
+        const recalledAnchors = await this.#anchorStore.searchAnchors(this.#startingEmbed, this.#startingKeywords, {
+            limit : this.#maxMemoryAnchors,
+            maxSequenceId : Math.min(visibleAnchorIds)
+        });
 
         if (recalledAnchors.length > 0) {
             const relevantMemories = recalledAnchors.map((m) => {
