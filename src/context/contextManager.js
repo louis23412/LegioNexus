@@ -229,10 +229,10 @@ export class ContextManager {
         }).sort((a, b) => b.score - a.score);
     }
 
-    #rerankActiveKeywords(recalledKwList, currentText) {
-        if (!recalledKwList?.length) return [];
+    #rerankActiveKeywords(limit, activeKwList, currentText) {
+        if (!activeKwList?.length) return [];
 
-        let candidates = recalledKwList
+        let candidates = activeKwList
             .filter(kw => kw && kw.length >= this.#keywordConfig.minWordLength)
             .filter(kw => !this.#keywordConfig.coreStopWords.has(kw.toLowerCase()));
 
@@ -254,7 +254,7 @@ export class ContextManager {
 
         return finalScored
             .sort((a, b) => b.score - a.score)
-            .slice(0, 10)
+            .slice(0, limit)
             .map(item => item.phrase);
     }
 
@@ -364,6 +364,7 @@ export class ContextManager {
     #buildContextSpace(recent = null, memories = null, keywords = null) {
         if (keywords?.length > 0) {
             keywords = this.#rerankActiveKeywords(
+                10,
                 [ ...new Set(keywords) ], 
                 `${this.#pinnedUserIntent} ${this.#prevUserQuery ? this.#prevUserQuery : ''}`
             );
@@ -648,7 +649,15 @@ export class ContextManager {
             }
         };
 
-        const recalledAnchors = await this.#anchorStore.searchAnchors(this.#startingEmbed, this.#startingKeywords, {
+        const tempKeyWords = [ ...new Set(activeKeywords) ];
+
+        const tempRankedWords = this.#rerankActiveKeywords(
+            Math.max(25, Math.round(tempKeyWords.length * 0.15)),
+            tempKeyWords,
+            `${this.#pinnedUserIntent} ${this.#prevUserQuery ? this.#prevUserQuery : ''}`
+        );
+
+        const recalledAnchors = await this.#anchorStore.searchAnchors(this.#startingEmbed, tempRankedWords, {
             limit : this.#maxMemoryAnchors,
             maxSequenceId : Math.min(visibleAnchorIds)
         });
