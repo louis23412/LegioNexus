@@ -46,13 +46,19 @@ export class ContextStore {
                     sort: { createdAt: -1 },
                     projection: { 
                         lastQuery: 1,
-                        context: 1
+                        start : 1,
+                        end : 1,
+                        context: 1,
+                        boostTerms : 1
                     }
                 }
             );
 
             return {
                 lastQuery : result?.lastQuery ?? null,
+                start : result?.start ?? null,
+                end : result?.end ?? null,
+                boostTerms : result?.boostTerms ?? [],
                 context : result?.context ?? []
             }
         } catch (error) {
@@ -60,6 +66,9 @@ export class ContextStore {
             
             return {
                 lastQuery : null,
+                start : null,
+                end : null,
+                boostTerms : [],
                 context : []
             };
         }

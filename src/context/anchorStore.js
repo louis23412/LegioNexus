@@ -168,7 +168,11 @@ export class AnchorStore {
                         status: 1,
                         resolverData : {
                             resolutionAnchor : 1
-                        }
+                        },
+
+                        dense_keywords : 1,
+                        trajectory_keywords : 1,
+                        raw_keywords : 1
                     }
                 }
             ).toArray();
@@ -178,7 +182,12 @@ export class AnchorStore {
                     Number(val.sequenceId), 
                     { 
                         status : val.status, 
-                        resolutionAnchor : val.resolverData?.resolutionAnchor ?? null
+                        resolutionAnchor : val.resolverData?.resolutionAnchor ?? null,
+                        keywords : [ ...new Set([ 
+                            ...val.dense_keywords ?? [], 
+                            ...val.trajectory_keywords ?? [], 
+                            ...val.raw_keywords ?? [] 
+                        ]) ]
                     } 
                 ])
             ) : {};
@@ -392,9 +401,7 @@ export class AnchorStore {
     }
 
     async resolveActiveAnchors(startingAnchorId, resolutionAnchorId) {
-        if (!startingAnchorId || !resolutionAnchorId) {
-            return 0;
-        }
+        const resolveTime = new Date();
 
         try {
             const result = await this.#dbCollection.updateMany(
@@ -406,15 +413,16 @@ export class AnchorStore {
                     $set: {
                         status: 'RESOLVED',
                         'resolverData.resolutionAnchor': Number(resolutionAnchorId),
-                        updatedAt: new Date()
+                        updatedAt: resolveTime
                     }
                 }
             );
 
-            return result.modifiedCount;
+            return resolveTime;
         } catch (error) {
             console.error('[AnchorStore] resolveActiveAnchors failed:', error);
-            return 0;
+
+            return null;
         }
     }
 }

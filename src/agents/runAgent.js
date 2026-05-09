@@ -353,7 +353,7 @@ const getCtxUpdate = async (agentName, messages, ctxManager, isLast, finalResult
     }
 };
 
-const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
+const runAgent = async (agentName, userPrompt, userAlias) => {
     const selectedConfig = activeState.agentsConfig[agentName];
 
     const agentTools = selectedConfig.tools.map(name => activeState.toolRegistry[name]?.definition).filter(Boolean);
@@ -368,8 +368,7 @@ const runAgent = async (agentName, userPrompt, userAlias, toolHeader) => {
         userAlias, 
         activeState.conversationId, 
         selectedConfig.system, 
-        userPrompt, 
-        toolHeader,
+        userPrompt,
         starterEmbeddings
     );
 
@@ -530,9 +529,7 @@ export const startConversation = async (convId, userPrompt, userAlias, eSckt, si
 
         const finalResult = await runAgent(
             totalLeaders[0][0], 
-            userPrompt,
-            userAlias,
-            `The user addressing you has set their preferred alias to: ${userAlias}. Refer to them by this name.`
+            userPrompt, userAlias
         );
 
         const duration = ((performance.now() - start) / 1000).toFixed(2);

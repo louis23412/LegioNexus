@@ -7,14 +7,16 @@ import { ContextStore } from './contextStore.js';
 
 export class ContextManager {
     #agentName; #master; #convId;
-    #systemDirectives; #pinnedUserIntent; #pinnedToolHeader;
+    #systemDirectives; #pinnedUserIntent;
     #maxRecentTurns; #maxVisibleAnchors; #maxMemoryAnchors;
     #anchorSeq; #startingAnchor;
-    #anchorStore; #contextStore;
+    #startTime; #endTime;
+    #prevStartTime; #prevEndTime;
     #startingEmbed; #startingKeywords;
+    #anchorStore; #contextStore;
     #prevUserQuery; #keywordConfig;
 
-    constructor(agentName, master, convId, sysDir, userInt, toolHead, seq, startEmbed, stores) {
+    constructor(agentName, master, convId, sysDir, userInt, seq, startEmbed, stores) {
         this.#agentName = agentName;
         this.#master = master;
         this.#convId = convId;
@@ -26,11 +28,17 @@ export class ContextManager {
         this.#anchorSeq = seq;
 
         this.#startingAnchor = null;
+
+        this.#startTime = new Date(),
+        this.#endTime = null,
+
+        this.#prevStartTime = null,
+        this.#prevEndTime = null,
+
         this.#prevUserQuery = null;
 
         this.#systemDirectives = sysDir;
         this.#pinnedUserIntent = userInt;
-        this.#pinnedToolHeader = toolHead;
 
         this.#startingEmbed = startEmbed;
 
@@ -57,7 +65,7 @@ export class ContextManager {
         this.#startingKeywords = this.#extractKeywords(this.#pinnedUserIntent);
     }
 
-    static async init(dbUrl, embedDim, collectionName, agentName, master, convId, sysDir, userInt, toolHead, startEmbed) {
+    static async init(dbUrl, embedDim, collectionName, agentName, master, convId, sysDir, userInt, startEmbed) {
         const contextStore = new ContextStore(dbUrl, collectionName);
         const anchorStore = new AnchorStore(dbUrl, embedDim, collectionName);
 
@@ -67,7 +75,7 @@ export class ContextManager {
         const anchorSeq = await anchorStore.getCurrentSequenceId();
 
         const returnCtxManager = new ContextManager(
-            agentName, master, convId, sysDir, userInt, toolHead, 
+            agentName, master, convId, sysDir, userInt, 
             anchorSeq, startEmbed, { contextStore, anchorStore }
         );
 
@@ -86,7 +94,6 @@ export class ContextManager {
             ${this.#master.toLowerCase()}
             ${this.#agentName.toLowerCase()}
             ${this.#systemDirectives.toLowerCase()}
-            ${this.#pinnedToolHeader.toLowerCase()}
             ${this.#pinnedUserIntent.toLowerCase()}
         `;
 
@@ -222,7 +229,7 @@ export class ContextManager {
         }).sort((a, b) => b.score - a.score);
     }
 
-    #rerankRecalledKeywords(recalledKwList, currentText) {
+    #rerankActiveKeywords(recalledKwList, currentText) {
         if (!recalledKwList?.length) return [];
 
         let candidates = recalledKwList
@@ -300,6 +307,33 @@ export class ContextManager {
         };
     }
 
+    #compactTimestamp(date) {
+        return (new Date(date).toLocaleString()).replaceAll(' ', '');
+    }
+
+    #exactTimeDiff(date1, date2) {
+        const diffMs = date2.getTime() - date1.getTime();
+        if (diffMs < 0) return '0s';
+
+        const totalSeconds = Math.floor(diffMs / 1000);
+
+        if (totalSeconds >= 86400) {
+            return '> 1 day';
+        }
+
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+
+        const parts = [];
+
+        if (hours > 0) parts.push(`${hours}h`);
+        if (minutes > 0) parts.push(`${minutes}m`);
+        if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
+
+        return parts.join('');
+    }
+
     #sanitizeText(text) {
         if (!text || typeof text !== 'string') {
             return '';
@@ -327,39 +361,113 @@ export class ContextManager {
         return cleaned.trim();
     }
 
-    #buildContextSpace(recent, memories = null, keywords = null) {
+    #buildContextSpace(recent = null, memories = null, keywords = null) {
+        if (keywords?.length > 0) {
+            keywords = this.#rerankActiveKeywords(
+                [ ...new Set(keywords) ], 
+                `${this.#pinnedUserIntent} ${this.#prevUserQuery ? this.#prevUserQuery : ''}`
+            );
+        }
+
+        const latestSysTime = new Date();
+
+        const strictCommands = '/strict_protocol /tool_priority /team_collaboration';
+
+        const keywordBlock = keywords?.length > 0 ? `ACTIVE TOPICS / RELEVANT KEYWORDS:\n${keywords.join(' - ')}` : '';
+
+        const memoryBlock = memories?.length > 0 ? `RECALLED MEMORIES / HISTORICAL ANCHORS:\n${memories.join('\n')}` : '';
+
+        const contextFramingBlock = `
+            Your assigned name : "${this.#agentName}"
+            The user addressing you has set their preferred alias to "${this.#master}". Refer to them by this name.
+        `;
+
+        const currTimeBlock = `
+            Exact current system / user local time: [${this.#compactTimestamp(latestSysTime)}]
+            You can refer to this timestamp for any time / date related tasks OR use your date time tool to confirm.
+        `;
+
+        const currQueryBlock = `
+            Current user query : "${this.#pinnedUserIntent}"
+            Current query system timestamp : [start:${this.#compactTimestamp(this.#startTime)}]
+            The system time has progressed ${this.#exactTimeDiff(this.#startTime, latestSysTime)} since the current query has been received
+        `;
+
+        const prevQueryBlock = this.#prevUserQuery ?
+            `
+                Previous user query : "${this.#prevUserQuery}"
+                ${this.#prevStartTime && this.#prevEndTime ? 
+                    `
+                        Previous query system timestamps : [start:${this.#compactTimestamp(this.#prevStartTime)}|resolved:${this.#compactTimestamp(this.#prevEndTime)}]
+                        The system time has progressed ${this.#exactTimeDiff(this.#prevEndTime, latestSysTime)} since the previous query has been resolved
+                    `
+                    : ''
+                }
+            `
+            : '';
+
+        const anchorHelperBlock = this.#anchorSeq > 0 ? 
+            `
+                Most recent context anchor available: ${this.#anchorSeq}.
+                Context anchors can be seen as conversation checkpoints / progression trackers.
+                Use any context anchors provided by the system to traverse and confirm the conversation flow.
+                Only you can see the anchors provided by the system to your current context window.
+
+                ${this.#startingAnchor && this.#anchorSeq - this.#startingAnchor > 2 ? 
+                    `Context anchors for the current query range from : ${this.#startingAnchor} - ${this.#anchorSeq}`
+                    : ''
+                }
+
+                All anchors have the following labels:
+                - CTX_ANC_A... (Context anchor + id)
+                - STATUS (ACTIVE for anchors related to the current active user query, RESOLVED for any previous user queries)
+                - RES_ANC (Pointer to the resolution anchor that marks the resolved state of that user query. All RESOLVED anchors will have a resolution pointer)
+                - SYS_TIME (Exact system time at which the context anchor was created)
+
+                - U (user intent / goal, at the time of anchor creation)
+                - S (system / context state, at the time of anchor creation)
+                - P (key events / state changes, at the time of anchor creation)
+                - T (key topics / entities, at the time of anchor creation)
+            ` 
+            : '';
+
         const sysCoreMessage = `
+            ${strictCommands}
+
             SYSTEM DIRECTIVES (High priority):
             ${this.#systemDirectives}
-            ${this.#pinnedToolHeader}
+
+            CONTEXT FRAMING / NAMING (High priority):
+            ${contextFramingBlock}
 
             MISSION / TASK / USER INTENT (High priority):
-            ${this.#prevUserQuery ? `Previous user query: ${this.#prevUserQuery}` : ''}
-            ${`Current user query: ${this.#pinnedUserIntent}`}
+            ${currTimeBlock}
+            ${prevQueryBlock}
+            ${currQueryBlock}
 
-            ${keywords ? 'ACTIVE TOPICS / RELEVANT KEYWORDS:' : ''}
-            ${keywords ? keywords.join(' - ') : ''}
+            ${keywordBlock}
 
-            ${memories ? 'RECALLED MEMORIES / HISTORICAL ANCHORS:' : ''}
-            ${memories ? memories.join('\n') : ''}
+            ${memoryBlock}
 
-            Most recent context anchor available: ${this.#anchorSeq}
-            Use any context anchors provided by the system to traverse and confirm the conversation flow.
+            ${anchorHelperBlock}
+
+            ${strictCommands}
 
             UNCOMPRESSED LATEST CONVERSATION MESSAGES:
         `;
 
-        const curatedContext = [
-            { role : 'system', eventId : 'SYS-CORE', content : sysCoreMessage }, 
-            ...recent
-        ].map((m) => {
+        const newUserMessage = { role : 'user', eventId : crypto.randomUUID(), content : this.#pinnedUserIntent };
+
+        const curatedContext = recent ? 
+            [ { role : 'system', eventId : 'SYS-CORE', content : sysCoreMessage }, ...recent ] :
+            [ { role : 'system', eventId : 'SYS-CORE', content : sysCoreMessage }, newUserMessage ];
+
+        return curatedContext.map((m) => {
             if (m.content) m.content = this.#sanitizeText(m.content);
             if (m.thinking) m.thinking = this.#sanitizeText(m.thinking);
 
             return m;
         });
-
-        return curatedContext;
     }
 
     extractAnchorFeatures(context, embeddingData, summaryData) {
@@ -470,23 +578,35 @@ export class ContextManager {
             });
         };
 
+        let curatedContext;
+
+        const activeKeywords = [ ...this.#startingKeywords ];
+
         if (!fullMessages) {
             const restoredContext = await this.#contextStore.getLastSnapshot();
 
             if (!restoredContext.context || restoredContext.context?.length < 1 ) {
-                return [
-                    { role : 'system', eventId : 'SYS-CORE', content : this.#sanitizeText(`${this.#systemDirectives}\n${this.#pinnedToolHeader}`) },
-                    { role : 'user', eventId : crypto.randomUUID(), content : this.#sanitizeText(this.#pinnedUserIntent) }
-                ]
+                curatedContext = this.#buildContextSpace(null, null, activeKeywords);
+                return curatedContext;
             }
 
-            if (restoredContext.lastQuery) this.#prevUserQuery = restoredContext.lastQuery;
+            if (restoredContext.start) this.#prevStartTime = restoredContext.start;
+            if (restoredContext.end) this.#prevEndTime = restoredContext.end;
+
+            if (restoredContext.lastQuery) {
+                this.#prevUserQuery = restoredContext.lastQuery;
+
+                const prevKeywords = this.#extractKeywords(this.#prevUserQuery);
+                activeKeywords.push(...prevKeywords);
+            };
+
+            if (restoredContext?.boostTerms?.length > 0) this.#addBoostTerms(restoredContext.boostTerms);
 
             fullMessages = restoredContext.context;
             fullMessages.push({ role : 'user', eventId : crypto.randomUUID(), content : this.#sanitizeText(this.#pinnedUserIntent) })
         }
 
-        if (isLast) await this.#anchorStore.resolveActiveAnchors(this.#startingAnchor, this.#anchorSeq);
+        if (isLast) this.#endTime = await this.#anchorStore.resolveActiveAnchors(this.#startingAnchor, this.#anchorSeq);
 
         fullMessages = fullMessages.filter(msg => msg.eventId !== 'SYS-CORE');
 
@@ -500,7 +620,7 @@ export class ContextManager {
                 `${newMsgChunk.content ? newMsgChunk.content : ''} ${newMsgChunk.thinking ? newMsgChunk.thinking : ''}`
             );
 
-            this.#addBoostTerms(chunkKeywords);
+            if (chunkKeywords.length > 0) this.#addBoostTerms(chunkKeywords);
         }
 
         const visibleAnchorIds = fullMessages.filter(x => x.eventId.includes('ctx-')).map(i => Number(i.eventId.slice(4)));
@@ -520,11 +640,13 @@ export class ContextManager {
                             `STATUS:${actualAnchorData.status}|RES_ANC:A${actualAnchorData.resolutionAnchor}`
                         );
                     }
+
+                    if (actualAnchorData && actualAnchorData.keywords?.length > 0) {
+                        activeKeywords.push(...actualAnchorData.keywords)
+                    }
                 }
             }
         };
-
-        let curatedContext;
 
         const recalledAnchors = await this.#anchorStore.searchAnchors(this.#startingEmbed, this.#startingKeywords, {
             limit : this.#maxMemoryAnchors,
@@ -533,27 +655,27 @@ export class ContextManager {
 
         if (recalledAnchors.length > 0) {
             const relevantMemories = recalledAnchors.map((m) => {
-                const resAnc = !m.resolverData.resolutionAnchor ? '-' : `A${m.resolverData.resolutionAnchor}`
-                const compactTimeStamp = (new Date(m.created).toLocaleString()).replaceAll(' ', '');
+                const resAnc = !m.resolverData.resolutionAnchor ? '-' : `A${m.resolverData.resolutionAnchor}`;
+                const compactTimeStamp = this.#compactTimestamp(m.created);
 
                 const { U, S, P, T } = m.summary;
 
                 return `[CTX_ANC_${m.id}|STATUS:${m.status}|RES_ANC:${resAnc}|SYS_TIME:${compactTimeStamp}]=[U:${U}][S:${S}][P:${P}][T:${T}]`;
             });
 
-            const allRecalledKeywords = [...new Set((recalledAnchors.map(m => m.keywords)).flat())];
+            const allRecalledKeywords = [ ...new Set((recalledAnchors.map(m => m.keywords)).flat()) ];
+            activeKeywords.push(...allRecalledKeywords);
 
-            const currentQueryText = this.#pinnedUserIntent + (this.#prevUserQuery ? ` ${this.#prevUserQuery}` : '');
-
-            const relevantKeywords = this.#rerankRecalledKeywords(allRecalledKeywords, currentQueryText);
-
-            curatedContext = this.#buildContextSpace(fullMessages, relevantMemories, relevantKeywords);
+            curatedContext = this.#buildContextSpace(fullMessages, relevantMemories, activeKeywords);
         } else {
-            curatedContext = this.#buildContextSpace(fullMessages, null, null);
+            curatedContext = this.#buildContextSpace(fullMessages, null, activeKeywords);
         }
 
         await this.#contextStore.newSnapshot(curatedContext, {
-            lastQuery : this.#pinnedUserIntent
+            lastQuery : this.#pinnedUserIntent,
+            start : this.#startTime,
+            end : this.#endTime,
+            boostTerms : [ ...this.#keywordConfig.boostTerms ]
         });
 
         return curatedContext;

@@ -38,8 +38,7 @@ export const createHandler = ({ runAgentFn, agentsConfig, createErrorResponse })
             memberResult = await runAgentFn(
                 member_name,
                 `Task from ${context.agentName}:\n${query}`,
-                context.agentName,
-                `You are being adressed by ${context.agentName}. Refer to them by this name.`
+                context.agentName
             );
         } catch (err) {
             return createErrorResponse(`Member ${member_name} crashed during consultation: ${err.message}`, 'MEMBER_CRASH');
