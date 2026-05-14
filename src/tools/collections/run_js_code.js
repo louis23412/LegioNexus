@@ -28,12 +28,12 @@ export const definition = {
             required: ['code'],
             additionalProperties: false
         },
-        version: '2.6'
+        version: '1.0'
     }
 };
 
 export const createHandler = ({ createErrorResponse }) => {
-    return async (args, context = {}) => {
+    return async (args) => {
         let { code, timeoutMs = 30000, memoryLimitMB = 128 } = args || {};
 
         if (!code || typeof code !== 'string' || !code.trim()) {

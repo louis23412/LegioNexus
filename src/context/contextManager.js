@@ -1,22 +1,32 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import ollama from 'ollama';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import { AnchorStore } from './anchorStore.js';
 import { ContextStore } from './contextStore.js';
+import { stripEventIds, withRetry } from '../utils.js';
+import { summaryDefinitions, memTemplate, verifyTemplate } from './summaries.js';
 
 export class ContextManager {
     #agentName; #master; #convId;
-    #systemDirectives; #pinnedUserIntent;
-    #maxRecentTurns; #maxVisibleAnchors; #maxMemoryAnchors;
+
+    #pinnedUserIntent; #prevUserQuery;
+
+    #maxRecentTurns; 
+    #maxVisibleAnchors; #maxMemoryAnchors;
+
     #anchorSeq; #startingAnchor;
+
     #startTime; #endTime;
     #prevStartTime; #prevEndTime;
-    #startingEmbed; #startingKeywords;
-    #anchorStore; #contextStore;
-    #prevUserQuery; #keywordConfig;
 
-    constructor(agentName, master, convId, sysDir, userInt, seq, startEmbed, stores) {
+    #anchorStore; #contextStore;
+
+    #keywordConfig;
+
+    constructor(agentName, master, convId, userInt, seq, stores) {
         this.#agentName = agentName;
         this.#master = master;
         this.#convId = convId;
@@ -37,37 +47,82 @@ export class ContextManager {
 
         this.#prevUserQuery = null;
 
-        this.#systemDirectives = sysDir;
         this.#pinnedUserIntent = userInt;
-
-        this.#startingEmbed = startEmbed;
 
         this.#anchorStore = stores.anchorStore;
         this.#contextStore = stores.contextStore;
 
         this.#keywordConfig = {
             minWordLength: 3,
-            maxKeywordsPerText: 20,
             ngramMax: 3,
-            tfThreshold: 1,
-            coreStopWords: new Set([
-                'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
-                'by', 'from', 'up', 'into', 'over', 'after', 'before', 'is', 'are', 'was', 'were',
-                'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-                'can', 'could', 'may', 'might', 'shall', 'should', 'must'
-            ]),
-            boostTerms: new Set()
+
+            boostTerms: new Set(),
+
+            weakWords: new Set([
+                'hey', 'hello', 'hi', 'sup', 'yo', 'greetings',
+
+                'what', 'when', 'where', 'who', 'whom', 'whose', 'why', 'how',
+                'which', 'whether',
+
+                'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+                'do', 'does', 'did', 'done', 'doing',
+                'have', 'has', 'had', 'having',
+                'will', 'would', 'can', 'could', 'may', 'might', 'shall', 'should', 'must',
+                'ought', 'need', 'dare',
+
+                "don't", "doesn't", "didn't", "won't", "wouldn't", "can't", "couldn't",
+                "isn't", "aren't", "wasn't", "weren't", "haven't", "hasn't", "hadn't",
+                "not", "no", "nor",
+
+                'the', 'a', 'an',
+                'this', 'that', 'these', 'those',
+                'i', 'me', 'my', 'mine', 'myself',
+                'you', 'your', 'yours', 'yourself', 'yourselves',
+                'he', 'him', 'his', 'himself',
+                'she', 'her', 'hers', 'herself',
+                'it', 'its', 'itself',
+                'we', 'us', 'our', 'ours', 'ourselves',
+                'they', 'them', 'their', 'theirs', 'themselves',
+                'one', 'someone', 'anyone', 'everyone', 'noone', 'nobody', 'somebody',
+
+                'and', 'or', 'but', 'yet', 'so', 'for', 'nor',
+                'although', 'though', 'because', 'since', 'unless', 'until', 'while', 'whereas',
+
+                'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'up', 'into', 'over', 'after', 'before',
+                'about', 'above', 'across', 'against', 'along', 'among', 'around', 'as', 'behind', 'below', 'beneath',
+                'beside', 'between', 'beyond', 'down', 'during', 'except', 'inside', 'near', 'off', 'out', 'outside',
+                'past', 'per', 'through', 'throughout', 'toward', 'towards', 'under', 'until', 'upon', 'via', 'within', 'without',
+
+                'there', 'here', 'then', 'now', 'so', 'just', 'like', 'very', 'really', 'quite', 'too', 'also',
+                'again', 'always', 'never', 'ever', 'often', 'sometimes', 'usually', 'already', 'still', 'yet',
+                'maybe', 'perhaps', 'probably', 'actually', 'basically', 'simply', 'just', 'only', 'even',
+                'well', 'right', 'okay', 'ok', 'yes', 'yeah', 'no', 'nah', 'sure', 'please', 'thanks', 'thank',
+
+                'some', 'any', 'all', 'other', 'another', 'each', 'every', 'few', 'many', 'more', 'most', 'several', 'such',
+                'both', 'either', 'neither', 'whole', 'same',
+
+                'uh', 'um', 'er', 'ah', 'oh', 'yeah', 'yep', 'yup', 'nah', 'hmm', 'like',
+
+                'if', 'else', 'than', 'then', 'when', 'where', 'while',
+                'own', 'same', 'such', 'rather', 'quite', 'much', 'more', 'most',
+                'get', 'got', 'gets', 'getting',
+                'make', 'makes', 'made', 'making',
+                'take', 'takes', 'took', 'taken', 'taking',
+                'say', 'says', 'said', 'saying',
+                'see', 'saw', 'seen', 'seeing',
+                'go', 'goes', 'went', 'gone', 'going',
+                'come', 'comes', 'came', 'coming',
+                'know', 'knows', 'knew', 'known',
+                'think', 'thinks', 'thought',
+                'want', 'wants', 'wanted',
+                'let', 'lets'
+            ])
         };
-
-        const systemBoostTerms = this.#extractKeyTerms();
-        this.#addBoostTerms(systemBoostTerms);
-
-        this.#startingKeywords = this.#extractKeywords(this.#pinnedUserIntent);
     }
 
-    static async init(dbUrl, embedDim, collectionName, agentName, master, convId, sysDir, userInt, startEmbed) {
+    static async init(dbUrl, collectionName, agentName, master, convId, userInt) {
         const contextStore = new ContextStore(dbUrl, collectionName);
-        const anchorStore = new AnchorStore(dbUrl, embedDim, collectionName);
+        const anchorStore = new AnchorStore(dbUrl, summaryDefinitions.embed_model.dimensions, collectionName);
 
         await contextStore.init();
 
@@ -75,8 +130,7 @@ export class ContextManager {
         const anchorSeq = await anchorStore.getCurrentSequenceId();
 
         const returnCtxManager = new ContextManager(
-            agentName, master, convId, sysDir, userInt, 
-            anchorSeq, startEmbed, { contextStore, anchorStore }
+            agentName, master, convId, userInt, anchorSeq, { contextStore, anchorStore }
         );
 
         return returnCtxManager;
@@ -89,226 +143,22 @@ export class ContextManager {
         } catch (e) {}
     }
 
-    #extractKeyTerms() {
-        const text = `
-            ${this.#master.toLowerCase()}
-            ${this.#agentName.toLowerCase()}
-            ${this.#systemDirectives.toLowerCase()}
-            ${this.#pinnedUserIntent.toLowerCase()}
-        `;
-
-        const tokens = text
-            .replace(/[^\w\s'-]/g, ' ')
-            .split(/\s+/)
-            .map(t => t.trim())
-            .filter(t => t.length >= 4);
-
-        const candidates = new Set();
-
-        for (let i = 0; i < tokens.length; i++) {
-            if (tokens[i].length >= 5) {
-                candidates.add(tokens[i]);
-            }
-            if (i < tokens.length - 1) {
-                const bigram = `${tokens[i]} ${tokens[i + 1]}`;
-                if (bigram.length >= 8) {
-                    candidates.add(bigram);
-                }
-            }
-        }
-
-        const scored = Array.from(candidates).map(term => {
-            const words = term.split(' ');
-            let score = words.length;
-
-            if (term.length > 12) score += 2;
-            if (words.length === 2) score += 1.5;
-
-            const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(`\\b${escapedTerm.replace(/ /g, '\\s+')}\\b`, 'g');
-            const occurrences = (text.match(regex) || []).length;
-
-            if (occurrences > 1) score += 3;
-
-            const generic = new Set(['your', 'task', 'role', 'you', 'will', 'must', 'should', 'can', 'help', 'user', 'respond']);
-            if (words.some(w => generic.has(w))) score -= 1.5;
-
-            return { term, score };
-        });
-
-        return scored
-            .sort((a, b) => b.score - a.score)
-            .slice(0, 12)
-            .map(item => item.term);
-    }
-
-    #addBoostTerms(terms) {
-        if (!terms) return;
-        if (Array.isArray(terms)) {
-            terms.forEach(term => {
-                if (term) this.#keywordConfig.boostTerms.add(term.toLowerCase().trim());
-            });
-        } else if (typeof terms === 'string') {
-            this.#keywordConfig.boostTerms.add(terms.toLowerCase().trim());
-        }
-    }
-
-    #generateNGrams(text) {
-        const tokens = text
-            .replace(/[^\w\s'-]/g, ' ')
-            .split(/\s+/)
-            .map(t => t.trim())
-            .filter(t => t.length >= this.#keywordConfig.minWordLength);
-
-        const ngrams = new Set();
-
-        for (let n = 1; n <= this.#keywordConfig.ngramMax; n++) {
-            for (let i = 0; i <= tokens.length - n; i++) {
-                const gram = tokens.slice(i, i + n).join(' ').trim();
-                if (gram.length >= this.#keywordConfig.minWordLength) {
-                    ngrams.add(gram);
-                }
-            }
-        }
-
-        return Array.from(ngrams);
-    }
-
-    #countOccurrences(text, phrase) {
-        const escaped = this.#escapeRegExp(phrase);
-        const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
-        const matches = text.match(regex);
-        return matches ? matches.length : 0;
-    }
-
-    #escapeRegExp(string) {
-        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
-    #scoreKeywords(candidates, fullText) {
-        const sentences = fullText.split(/[.!?]+/).filter(s => s.trim().length > 5);
-        const totalSentences = Math.max(sentences.length, 1);
-
-        return candidates.map(phrase => {
-            const words = phrase.split(/\s+/);
-            const tf = this.#countOccurrences(fullText, phrase);
-
-            let docFreq = 0;
-            const escapedPhrase = this.#escapeRegExp(phrase);
-            const regex = new RegExp(`\\b${escapedPhrase}\\b`, 'i');
-
-            for (const sent of sentences) {
-                if (regex.test(sent)) docFreq++;
-            }
-            const idf = Math.log(1 + totalSentences / (docFreq || 1));
-
-            let score = tf * idf;
-
-            const isMultiWord = words.length > 1;
-            const hasNumber = /\d/.test(phrase);
-            const isEntityLike = /^[A-Z]/.test(phrase) || phrase === phrase.toUpperCase();
-
-            if (isMultiWord) score *= 1.45;
-            if (isEntityLike) score *= 1.25;
-            if (hasNumber && words.length === 1) score *= 0.6;
-
-            if (words.length === 1 && this.#keywordConfig.coreStopWords.has(phrase)) {
-                score *= 0.25;
-            }
-
-            if (this.#keywordConfig.boostTerms.has(phrase)) {
-                score *= 2.0;
-            }
-
-            return {
-                phrase,
-                score: Number(score.toFixed(4)),
-                tf,
-                length: words.length
-            };
-        }).sort((a, b) => b.score - a.score);
-    }
-
-    #rerankActiveKeywords(limit, activeKwList, currentText) {
-        if (!activeKwList?.length) return [];
-
-        let candidates = activeKwList
-            .filter(kw => kw && kw.length >= this.#keywordConfig.minWordLength)
-            .filter(kw => !this.#keywordConfig.coreStopWords.has(kw.toLowerCase()));
-
-        const scored = this.#scoreKeywords(candidates, currentText.toLowerCase().trim());
-
-        const finalScored = scored.map(item => {
-            let score = item.score;
-
-            if (this.#keywordConfig.boostTerms.has(item.phrase)) {
-                score *= 2.5;
-            }
-
-            if (this.#countOccurrences(this.#pinnedUserIntent.toLowerCase(), item.phrase) > 0) {
-                score *= 1.8;
-            }
-
-            return { ...item, score: Number(score.toFixed(4)) };
-        });
-
-        return finalScored
-            .sort((a, b) => b.score - a.score)
-            .slice(0, limit)
-            .map(item => item.phrase);
-    }
-
-    #extractKeywords(text) {
-        if (!text || typeof text !== 'string' || text.trim().length < 8) {
-            return [];
-        }
-
-        const lowerText = text.toLowerCase().trim();
-        const candidates = this.#generateNGrams(lowerText);
-        const scoredKeywords = this.#scoreKeywords(candidates, lowerText);
-
-        return scoredKeywords
-            .filter(item => item.score > 0.5)
-            .slice(0, this.#keywordConfig.maxKeywordsPerText)
-            .map(item => item.phrase);
-    }
-
-    #cosineSimilarity(a, b) {
-        if (!a || !a.length || !b || !b.length || a.length !== b.length) return 0;
-        let dot = 0, magA = 0, magB = 0;
-        for (let i = 0; i < a.length; i++) {
-            dot += a[i] * b[i];
-            magA += a[i] * a[i];
-            magB += b[i] * b[i];
-        }
-        if (magA === 0 || magB === 0) return 0;
-        return dot / (Math.sqrt(magA) * Math.sqrt(magB));
-    }
-
-    #jaccardSimilarity(setA, setB) {
-        const intersection = new Set([...setA].filter(x => setB.has(x)));
-        const union = new Set([...setA, ...setB]);
-        return union.size === 0 ? 0 : intersection.size / union.size;
-    }
-
     #hashContent(c) {
         const contentForHash = JSON.stringify(c);
         return crypto.createHash('sha256').update(contentForHash).digest('hex').slice(0, 16);
     }
 
-    #extractCurrentAnchorStatus(str) {
-        const regex = /\[CTX_ANC_(\d+)\|STATUS:([A-Z_]+)\|RES_ANC:([A-Z0-9-]+)\|/;
-        const match = str.match(regex);
-        if (!match) return null;
-        return {
-            anchorId: match[1],
-            status: match[2],
-            resolutionAnchor: match[3]
-        };
-    }
-
     #compactTimestamp(date) {
-        return (new Date(date).toLocaleString()).replaceAll(' ', '');
+        const d = new Date(date);
+        
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        const hours = String(d.getHours()).padStart(2, '0');
+        const minutes = String(d.getMinutes()).padStart(2, '0');
+        const seconds = String(d.getSeconds()).padStart(2, '0');
+        
+        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
     }
 
     #exactTimeDiff(date1, date2) {
@@ -334,127 +184,453 @@ export class ContextManager {
         return parts.join('');
     }
 
-    #sanitizeText(text) {
-        if (!text || typeof text !== 'string') {
-            return '';
+    #cosineSimilarity(a, b) {
+        if (!a || !a.length || !b || !b.length || a.length !== b.length) return 0;
+        let dot = 0, magA = 0, magB = 0;
+        for (let i = 0; i < a.length; i++) {
+            dot += a[i] * b[i];
+            magA += a[i] * a[i];
+            magB += b[i] * b[i];
+        }
+        if (magA === 0 || magB === 0) return 0;
+        return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+    }
+
+    #jaccardSimilarity(setA, setB) {
+        const intersection = new Set([...setA].filter(x => setB.has(x)));
+        const union = new Set([...setA, ...setB]);
+        return union.size === 0 ? 0 : intersection.size / union.size;
+    }
+
+    #extractCurrentAnchorStatus(str) {
+        const regex = /\[CTX_ANC_(\d+)\|STATUS:([A-Z_]+)\|RES_ANC:([A-Z0-9-]+)\|/;
+        const match = str.match(regex);
+        if (!match) return null;
+        return {
+            anchorId: match[1],
+            status: match[2],
+            resolutionAnchor: match[3]
+        };
+    }
+
+    #extractAnchorFeatures(context, summaryData, embeddingData) {
+        const kwConv = new Set(this.#extractKeywords(context));
+
+        const simDense = embeddingData.convEmbedding.length ? this.#cosineSimilarity(embeddingData.denseEmbedding, embeddingData.convEmbedding) : 0;
+        const kwDense = new Set(this.#extractKeywords(summaryData.denseSummary));
+        const jaccDense = this.#jaccardSimilarity(kwConv, kwDense);
+        const reliabilityDense = simDense * 0.7 + jaccDense * 0.3;
+
+        const simTraj = embeddingData.convEmbedding.length ? this.#cosineSimilarity(embeddingData.trajEmbedding, embeddingData.convEmbedding) : 0;
+        const kwTraj = new Set(this.#extractKeywords(summaryData.trajectorySummary));
+        const jaccTraj = this.#jaccardSimilarity(kwConv, kwTraj);
+        const reliabilityTraj = simTraj * 0.7 + jaccTraj * 0.3;
+
+        const simSelf = embeddingData.convEmbedding.length ? this.#cosineSimilarity(embeddingData.denseEmbedding, embeddingData.trajEmbedding) : 0;
+
+        return {
+            kwDense : [ ...kwDense ], 
+            kwTraj : [ ...kwTraj ], 
+            kwConv : [ ...kwConv ],
+
+            jaccDense: Number((jaccDense * 100).toFixed(3)),
+            jaccTraj: Number((jaccTraj * 100).toFixed(3)),
+
+            simDense: Number((simDense * 100).toFixed(3)),
+            simTraj: Number((simTraj * 100).toFixed(3)),
+            simSelf: Number((simSelf * 100).toFixed(3)),
+
+            reliabilityDense: Number((reliabilityDense * 100).toFixed(3)),
+            reliabilityTraj: Number((reliabilityTraj * 100).toFixed(3))
+        };
+    }
+
+    #calculateTrustScore(anchorData, verifierTrust, consistency) {
+        const safe = (val, def = 50) => (typeof val === 'number' && !isNaN(val) && val >= 0)
+            ? Math.min(100, Math.max(0, val)) : def;
+
+        const simDense = safe(anchorData.simDense);
+        const simTraj = safe(anchorData.simTraj);
+        const jaccDense = safe(anchorData.jaccDense);
+        const jaccTraj = safe(anchorData.jaccTraj);
+        const simSelf = safe(anchorData.simSelf);
+        const relDense = safe(anchorData.reliabilityDense);
+        const relTraj = safe(anchorData.reliabilityTraj);
+
+        const consistencyScore = safe(consistency);
+
+        const hasVerifier = (typeof verifierTrust === 'number' && !isNaN(verifierTrust));
+        const verifierScore = hasVerifier ? Math.min(100, Math.max(0, verifierTrust)) : 0;
+
+        const avgSim = (simDense + simTraj) / 2;
+        const avgJacc = (jaccDense + jaccTraj) / 2;
+        const relDelta = Math.abs(relDense - relTraj);
+        const relHarmony = 100 - relDelta;
+
+        const coherenceRaw = Math.max(0, 100 - Math.abs(simSelf - 75));
+        const crossAgreementBonus = Math.pow(coherenceRaw / 100, 1.3) * 38;
+
+        const semanticSynergy = Math.sqrt(simDense * simTraj) *
+            (1 + 0.001 * Math.pow(Math.min(simDense, simTraj), 1.8));
+
+        const keywordRobustness = Math.pow(avgJacc / 100, 0.85) * 100;
+
+        const varianceProxy = (Math.abs(simDense - simTraj) + Math.abs(jaccDense - jaccTraj) + relDelta) / 3;
+        const uncertaintyFactor = Math.exp(-varianceProxy / 45);
+        const dataVolumeConfidence = Math.min(1, (simDense + simTraj + avgJacc) / 220);
+
+        let baseWeights = {
+            semantic: 0.39,
+            keyword: 0.14,
+            consistency: 0.13,
+            coherence: 0.09,
+            reliability: 0.08,
+            synergy: 0.17
+        };
+
+        const signalStrength = (avgSim + keywordRobustness + consistencyScore) / 300;
+        if (signalStrength > 0.72) {
+            baseWeights.semantic += 0.04;
+            baseWeights.synergy += 0.03;
         }
 
-        let cleaned = text;
+        const linearBase =
+            baseWeights.semantic * semanticSynergy +
+            baseWeights.keyword * keywordRobustness +
+            baseWeights.consistency * consistencyScore +
+            baseWeights.coherence * crossAgreementBonus +
+            baseWeights.reliability * relHarmony +
+            baseWeights.synergy * (semanticSynergy * keywordRobustness / 75);
 
-        cleaned = cleaned.replace(/[\s\uFEFF\xA0\u2028\u2029]+/g, ' ');
+        const interactionFactor = 1 + (0.00085 * avgSim * consistencyScore * relHarmony) / 10000;
 
-        cleaned = cleaned.replace(/([.!?])\s+/g, '$1\n\n');
+        let internalScore = linearBase * interactionFactor * uncertaintyFactor * dataVolumeConfidence;
 
-        cleaned = cleaned
-            .replace(/\s+([A-Z][A-Z\s\/&-]{4,}?(?:\s+[A-Z][A-Z0-9\s\/&-]*?)?)\s*[:)]\s*/g, '\n\n$1:\n')
-            .replace(/\s*[-•*]\s+/g, '\n- ')
-            .replace(/\s*(\d+\.)\s+/g, '\n$1 ');
+        let finalInternal = 100 / (1 + Math.exp(-0.068 * (internalScore - 67)));
+        finalInternal = Math.min(99.7, finalInternal +
+            ((relHarmony > 93 && coherenceRaw > 88) ? 2.5 : 0));
 
-        cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+        if (!hasVerifier) {
+            return Number(finalInternal.toFixed(3));
+        }
 
-        cleaned = cleaned
-            .split('\n')
-            .map(line => line.trim())
-            .join('\n')
-            .replace(/\n{3,}/g, '\n\n');
+        const verifierInfluence = Math.pow(verifierScore / 100, 0.75) * 100;
+        const verifierWeight = 0.28;
 
-        return cleaned.trim();
+        const blendedScore = (finalInternal * (1 - verifierWeight)) + 
+                            (verifierInfluence * verifierWeight);
+
+        const finalScore = 100 / (1 + Math.exp(-0.065 * (blendedScore - 70)));
+
+        return Number(finalScore.toFixed(3));
+    }
+
+    #addBoostTerms(terms) {
+        if (!terms) return;
+        if (Array.isArray(terms)) {
+            terms.forEach(term => {
+                if (term) this.#keywordConfig.boostTerms.add(term.toLowerCase().trim());
+            });
+        } else if (typeof terms === 'string') {
+            this.#keywordConfig.boostTerms.add(terms.toLowerCase().trim());
+        }
+    }
+
+    #generateNGrams(text) {
+        const clean = this.#cleanTextForKeywords(text);
+        if (!clean) return [];
+
+        const tokens = clean
+            .split(/\s+/)
+            .map(t => t.trim())
+            .filter(t => t.length >= this.#keywordConfig.minWordLength);
+
+        const ngrams = new Set();
+
+        for (let n = 1; n <= this.#keywordConfig.ngramMax; n++) {
+            for (let i = 0; i <= tokens.length - n; i++) {
+                const gram = tokens.slice(i, i + n).join(' ').trim();
+                if (gram.length < this.#keywordConfig.minWordLength) continue;
+
+                if (this.#containsOnlyWeakWords(gram)) continue;
+
+                ngrams.add(gram);
+            }
+        }
+
+        return Array.from(ngrams);
+    }
+
+    #countOccurrences(text, phrase) {
+        const escaped = this.#escapeRegExp(phrase);
+        const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
+        const matches = text.match(regex);
+        return matches ? matches.length : 0;
+    }
+
+    #escapeRegExp(string) {
+        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    #isWeakWord(word) {
+        if (!word) return true;
+        return this.#keywordConfig.weakWords.has(word.toLowerCase().trim());
+    }
+
+    #isPureWeakPhrase(phrase) {
+        if (!phrase || typeof phrase !== 'string') return true;
+        const words = phrase.toLowerCase().trim().split(/\s+/).filter(Boolean);
+        if (words.length === 0) return true;
+        return words.every(word => this.#isWeakWord(word));
+    }
+
+    #containsOnlyWeakWords(phrase) {
+        return this.#isPureWeakPhrase(phrase);
+    }
+
+    #cleanTextForKeywords(text) {
+        if (!text || typeof text !== 'string') return '';
+        return text
+            .toLowerCase()
+            .replace(/[^\w\s'-]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    #extractKeywords(text) {
+        if (!text || typeof text !== 'string' || text.trim().length < 8) {
+            return [];
+        }
+
+        return this.#generateNGrams(text);
+    }
+
+    #scoreKeywords(candidates, fullText) {
+        const sentences = fullText.split(/[.!?]+/).filter(s => s.trim().length > 5);
+        const totalSentences = Math.max(sentences.length, 1);
+
+        return candidates.map(phrase => {
+            const words = phrase.split(/\s+/);
+            const tf = this.#countOccurrences(fullText, phrase);
+
+            let docFreq = 0;
+            const escapedPhrase = this.#escapeRegExp(phrase);
+            const regex = new RegExp(`\\b${escapedPhrase}\\b`, 'i');
+
+            for (const sent of sentences) {
+                if (regex.test(sent)) docFreq++;
+            }
+            const idf = Math.log(1 + totalSentences / (docFreq || 1));
+
+            let score = tf * idf;
+
+            const isMultiWord = words.length > 1;
+            const hasNumber = /\d/.test(phrase);
+            const isEntityLike = /^[A-Z]/.test(phrase) || phrase === phrase.toUpperCase();
+
+            if (isMultiWord) score *= 1.65;
+            if (isEntityLike) score *= 1.25;
+            if (hasNumber && words.length === 1) score *= 0.6;
+
+            if (this.#containsOnlyWeakWords(phrase)) {
+                score *= 0.05;
+            } else if (words.some(w => this.#isWeakWord(w))) {
+                score *= 0.45;
+            }
+
+            if (this.#keywordConfig.boostTerms.has(phrase)) {
+                score *= 2.5;
+            }
+
+            return {
+                phrase,
+                score: Number(score.toFixed(4)),
+                tf,
+                length: words.length
+            };
+        }).sort((a, b) => b.score - a.score);
+    }
+
+    #rerankActiveKeywords(limit, activeKwList, currentText) {
+        if (!activeKwList?.length) return [];
+
+        const seen = new Map();
+
+        for (const kw of activeKwList) {
+            if (!kw) continue;
+            const normalized = kw.toLowerCase().trim();
+            const hash = this.#hashContent(normalized);
+            if (!seen.has(hash)) {
+                seen.set(hash, kw.trim());
+            }
+        }
+
+        let candidates = Array.from(seen.values())
+            .filter(kw => kw.length >= this.#keywordConfig.minWordLength)
+            .filter(kw => !this.#containsOnlyWeakWords(kw))
+            .filter(kw => {
+                const words = kw.split(/\s+/);
+                if (words.length <= 2) {
+                    return words.some(w => !this.#isWeakWord(w));
+                }
+                return true;
+            });
+
+        if (!candidates.length) return [];
+
+        const scored = this.#scoreKeywords(candidates, currentText.toLowerCase().trim());
+
+        const finalScored = scored.map(item => {
+            let score = item.score;
+
+            if (this.#keywordConfig.boostTerms.has(item.phrase)) score *= 2.5;
+            if (this.#countOccurrences(this.#pinnedUserIntent.toLowerCase(), item.phrase) > 0) {
+                score *= 1.8;
+            }
+
+            return { ...item, score: Number(score.toFixed(4)) };
+        }).sort((a, b) => b.score - a.score);
+
+        const result = [];
+        const used = new Set();
+
+        for (const item of finalScored) {
+            if (used.has(item.phrase)) continue;
+
+            let isDuplicate = false;
+            for (const kept of result) {
+                if (this.#areKeywordsVerySimilar(kept, item.phrase)) {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+
+            if (!isDuplicate) {
+                result.push(item.phrase);
+                used.add(item.phrase);
+            }
+
+            if (result.length >= limit) break;
+        }
+
+        return result;
+    }
+
+    #areKeywordsVerySimilar(kw1, kw2) {
+        if (kw1 === kw2) return true;
+
+        const a = kw1.toLowerCase();
+        const b = kw2.toLowerCase();
+
+        if (a.length < 6 || b.length < 6) {
+            return a.includes(b) || b.includes(a);
+        }
+
+        const setA = new Set(a.split(/\s+/).filter(Boolean));
+        const setB = new Set(b.split(/\s+/).filter(Boolean));
+
+        const similarity = this.#jaccardSimilarity(setA, setB);
+
+        return similarity > 0.65;
+    }
+
+    #sanitizeText(text) {
+        return text.replaceAll('    ', '').trim();
+    }
+
+    #extractRawContent(messages) {
+        const contextView = messages.filter(msg => !(msg.eventId.includes('ctx-')));
+
+        const contentOnly = contextView.reduce((acc, msg) => {
+            if (msg.content) acc += ` ${msg.content}`;
+            if (msg.thinking) acc += ` ${msg.thinking}`;
+
+            return acc;
+        }, '');
+
+        return contentOnly;
     }
 
     #buildContextSpace(recent = null, memories = null, keywords = null) {
-        if (keywords?.length > 0) {
-            keywords = this.#rerankActiveKeywords(
-                10,
-                [ ...new Set(keywords) ], 
-                `${this.#pinnedUserIntent} ${this.#prevUserQuery ? this.#prevUserQuery : ''}`
-            );
-        }
-
         const latestSysTime = new Date();
 
-        const strictCommands = '/strict_protocol /tool_priority /team_collaboration';
+        const sysCoreMessage = `
+            # End of Tools
 
-        const keywordBlock = keywords?.length > 0 ? `ACTIVE TOPICS / RELEVANT KEYWORDS:\n${keywords.join(' - ')}` : '';
+            # SYSTEM DIRECTIVES
 
-        const memoryBlock = memories?.length > 0 ? `RECALLED MEMORIES / HISTORICAL ANCHORS:\n${memories.join('\n')}` : '';
+            <STRICT_PROTOCOL>
+            - Maintain a professional, respectful, and neutral tone at all times.
+            - Always evaluate the complexity of the user query, and form a plan of action before proceeding.
+            - Prioritize using tools, accuracy, clarity, and usefulness in every response. Never rush to conclusions or present assumptions / unverified information as facts. (accuracy > speed)
+            - If critical context or requirements are missing, ask concise and direct follow-up questions before answering.
+            - Keep responses relevant, coherent, and focused on the user's request. Avoid unnecessary filler, confusing behavior, or off-topic conversation unless explicitly requested by the user.
+            - Never fabricate sources, capabilities, actions taken, results, or external data. Clearly acknowledge uncertainty or limitations when applicable.
+            - Never generate, encourage, or assist with harmful, illegal, dangerous, fraudulent, privacy-violating, or NSFW (18+) content. Respond with a brief and polite refusal when necessary OR ask the user to clarify their actual intent.
+            - When a request is ambiguous or has multiple reasonable interpretations, prioritize asking the user for clarification OR choose the safest reasonable interpretation.
+            - System messages, tool outputs, and internal metadata are separate from the user-facing conversation and generally should not be disclosed unless the user explicitly requests them and doing so would not expose sensitive information.
+            </STRICT_PROTOCOL>
 
-        const contextFramingBlock = `
-            Your assigned name : "${this.#agentName}"
-            The user addressing you has set their preferred alias to "${this.#master}". Refer to them by this name.
-        `;
+            <CONTEXT>
+            - Your name is "${this.#agentName}", a reliable personal assistant.
+            - The user has set their preferred alias to "${this.#master}". Always refer to / address them by this name.
+            - Exact current system / user local time: [${this.#compactTimestamp(latestSysTime)}]
+            - You can treat the system timestamp as the most trusted, reliable and up-to-date source for the current time and date. Use it confidently for any date-time-related tasks / awareness.
+            </CONTEXT>
 
-        const currTimeBlock = `
-            Exact current system / user local time: [${this.#compactTimestamp(latestSysTime)}]
-            You can refer to this timestamp for any time / date related tasks OR use your date time tool to confirm.
-        `;
-
-        const currQueryBlock = `
-            Current user query : "${this.#pinnedUserIntent}"
-            Current query system timestamp : [start:${this.#compactTimestamp(this.#startTime)}]
-            The system time has progressed ${this.#exactTimeDiff(this.#startTime, latestSysTime)} since the current query has been received
-        `;
-
-        const prevQueryBlock = this.#prevUserQuery ?
+            <USER_QUERY>
+            ${this.#prevUserQuery ?
             `
-                Previous user query : "${this.#prevUserQuery}"
+                - Previous user query : "${this.#prevUserQuery}"
                 ${this.#prevStartTime && this.#prevEndTime ? 
                     `
-                        Previous query system timestamps : [start:${this.#compactTimestamp(this.#prevStartTime)}|resolved:${this.#compactTimestamp(this.#prevEndTime)}]
-                        The system time has progressed ${this.#exactTimeDiff(this.#prevEndTime, latestSysTime)} since the previous query has been resolved
+                        - Previous query system timestamps : [start:${this.#compactTimestamp(this.#prevStartTime)}|resolved:${this.#compactTimestamp(this.#prevEndTime)}]
+                        - The system time has progressed ${this.#exactTimeDiff(this.#prevEndTime, latestSysTime)} since the previous query has been resolved
                     `
                     : ''
                 }
             `
-            : '';
+            : ''}
 
-        const anchorHelperBlock = this.#anchorSeq > 0 ? 
+            - Current user query : "${this.#pinnedUserIntent}"
+            - Current query system timestamp : [start:${this.#compactTimestamp(this.#startTime)}]
+            - The system time has progressed ${this.#exactTimeDiff(this.#startTime, latestSysTime)} since the current query has been received
+            </USER_QUERY>
+
+            ${keywords?.length > 0 ? `<ACTIVE_TOPICS>\n${keywords.join(' | ')}\n</ACTIVE_TOPICS>` : ''}
+
+            ${memories?.length > 0 ? `<RELEVANT_MEMORIES>\n${memories.join('\n')}\n</RELEVANT_MEMORIES>` : ''}
+
+            ${this.#anchorSeq > 0 ? 
             `
-                Most recent context anchor available: ${this.#anchorSeq}.
-                Context anchors can be seen as conversation checkpoints / progression trackers.
-                Use any context anchors provided by the system to traverse and confirm the conversation flow.
-                Only you can see the anchors provided by the system to your current context window.
+                <ANCHOR_REFERENCE>
+                - Most recent context anchor available: ${this.#anchorSeq}.
+                - Context anchors can be seen as conversation checkpoints / progression trackers.
+                - Use any context anchors provided by the system to traverse and confirm the conversation flow.
+                - Only you can see the anchors provided by the system to your current context window.
 
                 ${this.#startingAnchor && this.#anchorSeq - this.#startingAnchor > 2 ? 
-                    `Context anchors for the current query range from : ${this.#startingAnchor} - ${this.#anchorSeq}`
+                    `- Context anchors for the current query range from : ${this.#startingAnchor} - ${this.#anchorSeq}`
                     : ''
                 }
 
-                All anchors have the following labels:
-                - CTX_ANC_A... (Context anchor + id)
-                - STATUS (ACTIVE for anchors related to the current active user query, RESOLVED for any previous user queries)
-                - RES_ANC (Pointer to the resolution anchor that marks the resolved state of that user query. All RESOLVED anchors will have a resolution pointer)
-                - SYS_TIME (Exact system time at which the context anchor was created)
+                - All anchors have the following labels:
+                -- CTX_ANC_A... (Context anchor + id)
+                -- STATUS (ACTIVE for anchors related to the current active user query, RESOLVED for any previous user queries)
+                -- RES_ANC (Pointer to the resolution anchor that marks the resolved state of that user query. All RESOLVED anchors will have a resolution pointer)
+                -- SYS_TIME (Exact system time at which the context anchor was created)
 
-                - U (user intent / goal, at the time of anchor creation)
-                - S (system / context state, at the time of anchor creation)
-                - P (key events / state changes, at the time of anchor creation)
-                - T (key topics / entities, at the time of anchor creation)
+                -- U (user intent / goal, at the time of anchor creation)
+                -- S (system / context state, at the time of anchor creation)
+                -- P (key events / state changes, at the time of anchor creation)
+                -- T (key topics / entities, at the time of anchor creation)
+                </ANCHOR_REFERENCE>
             ` 
-            : '';
+            : ''}
 
-        const sysCoreMessage = `
-            ${strictCommands}
+            # END OF SYSTEM DIRECTIVES
 
-            SYSTEM DIRECTIVES (High priority):
-            ${this.#systemDirectives}
-
-            CONTEXT FRAMING / NAMING (High priority):
-            ${contextFramingBlock}
-
-            MISSION / TASK / USER INTENT (High priority):
-            ${currTimeBlock}
-            ${prevQueryBlock}
-            ${currQueryBlock}
-
-            ${keywordBlock}
-
-            ${memoryBlock}
-
-            ${anchorHelperBlock}
-
-            ${strictCommands}
-
-            UNCOMPRESSED LATEST CONVERSATION MESSAGES:
+            # CONVERSATION HISTORY
         `;
 
         const newUserMessage = { role : 'user', eventId : crypto.randomUUID(), content : this.#pinnedUserIntent };
@@ -471,42 +647,118 @@ export class ContextManager {
         });
     }
 
-    extractAnchorFeatures(context, embeddingData, summaryData) {
-        const kwConv = new Set(this.#extractKeywords(context));
+    async #getContentEmbeddings(content) {
+        try {
+            const embeddings = await withRetry(async () => (await ollama.embed({ 
+                model : summaryDefinitions.embed_model.model, 
+                input : [ content ],
+                options: summaryDefinitions.embed_model.options
+            })).embeddings[0]);
 
-        const simDense = embeddingData.convEmbedding.length ? this.#cosineSimilarity(embeddingData.denseEmbedding, embeddingData.convEmbedding) : 0;
-        const kwDense = new Set(this.#extractKeywords(summaryData.denseSummary));
-        const jaccDense = this.#jaccardSimilarity(kwConv, kwDense);
-        const reliabilityDense = simDense * 0.7 + jaccDense * 0.3;
-
-        const simTraj = embeddingData.convEmbedding.length ? this.#cosineSimilarity(embeddingData.trajEmbedding, embeddingData.convEmbedding) : 0;
-        const kwTraj = new Set(this.#extractKeywords(summaryData.trajectorySummary));
-        const jaccTraj = this.#jaccardSimilarity(kwConv, kwTraj);
-        const reliabilityTraj = simTraj * 0.7 + jaccTraj * 0.3;
-
-        const simSelf = embeddingData.convEmbedding.length ? this.#cosineSimilarity(embeddingData.denseEmbedding, embeddingData.trajEmbedding) : 0;
-
-        return {
-            kwDense, 
-            kwTraj, 
-            kwConv,
-
-            denseSummary: summaryData.denseSummary,
-            trajectorySummary: summaryData.trajectorySummary,
-
-            jaccDense: Number((jaccDense * 100).toFixed(3)),
-            jaccTraj: Number((jaccTraj * 100).toFixed(3)),
-
-            simDense: Number((simDense * 100).toFixed(3)),
-            simTraj: Number((simTraj * 100).toFixed(3)),
-            simSelf: Number((simSelf * 100).toFixed(3)),
-
-            reliabilityDense: Number((reliabilityDense * 100).toFixed(3)),
-            reliabilityTraj: Number((reliabilityTraj * 100).toFixed(3))
-        };
+            return embeddings;
+        } catch (error) {
+            return [];
+        }
     }
 
-    async addAnchor(trustScore, isLast, summaryData, rawData, result = null) {
+    async #getContextSummary(type, context) {
+        const selectedSumType = summaryDefinitions[type];
+
+        let summaryContent = {};
+
+        const response = await withRetry(async () => ollama.chat({
+            model: selectedSumType.model,
+
+            messages: [
+                { role: 'system', content: selectedSumType.systemDirective },
+                { role: 'user', content: `Strictly follow the create_dense_summary protocol and summarize this:\n${JSON.stringify(context)}` }
+            ],
+
+            think: false,
+            stream: false,
+
+            format: zodToJsonSchema(memTemplate),
+
+            options: selectedSumType.options
+        }));
+
+        try {
+            const fullContent = response.message?.content || '';
+
+            if (fullContent) summaryContent = fullContent;
+
+            summaryContent = memTemplate.parse(JSON.parse(summaryContent));
+
+        } catch (err) {
+            summaryContent = {};
+        }
+
+        return summaryContent;
+    }
+
+    async #getVerificationSummary(context, anchorData, summaries) {
+        let verificationContent = {};
+
+        const response = await withRetry(async () => ollama.chat({
+            model: summaryDefinitions.verification_summary.model,
+
+            messages: [
+                { role: 'system', content: summaryDefinitions.verification_summary.systemDirective },
+
+                {
+                    role: 'user',
+                    content: `
+                        Strictly follow the verify_and_consolidate protocol and evaluate both summaries against the main conversation:
+
+                        1. Dense style summary:
+                        ${summaries.denseSummary}
+
+                        2. Trajectory style summary:
+                        ${summaries.trajectorySummary}
+
+                        Semantic similarity:
+                        - Dense vs Full conversation : ${anchorData.simDense} 
+                        - Trajectory vs Full conversation : ${anchorData.simTraj} 
+                        - Dense vs Trajectory : ${anchorData.simSelf}
+
+                        Jaccard keyword similarity:
+                        - Dense : ${anchorData.jaccDense} 
+                        - Trajectory : ${anchorData.jaccTraj}
+
+                        Reliability score:
+                        - Dense : ${anchorData.reliabilityDense} 
+                        - Trajectory : ${anchorData.reliabilityTraj}
+
+                        Full conversation:
+                        ${context}
+                    `
+                }
+            ],
+
+            think: false,
+            stream: false,
+
+            format: zodToJsonSchema(verifyTemplate),
+
+            options: summaryDefinitions.verification_summary.options
+        }));
+
+        try {
+            const fullContent = response.message?.content || '';
+
+            if (fullContent) {
+                verificationContent = fullContent;
+
+                verificationContent = verifyTemplate.parse(JSON.parse(verificationContent))
+            }
+        } catch (err) {
+            verificationContent = {};
+        }
+
+        return verificationContent;
+    }
+
+    async #addAnchor(trustScore, isLast, summaryData, rawData, result = null) {
         this.#anchorSeq++;
 
         if (!this.#startingAnchor) this.#startingAnchor = this.#anchorSeq;
@@ -556,7 +808,7 @@ export class ContextManager {
         };
     }
 
-    async getContextMessages(fullMessages, isSummary = false, isLast = false) {
+    async #getContextMessages(fullMessages, isSummary = false, isLast = false) {
         if (isSummary) {
             const fullPurgedMessages = fullMessages.filter(msg => msg.eventId !== 'SYS-CORE' && !(msg.eventId.includes('ctx-')));
 
@@ -581,13 +833,17 @@ export class ContextManager {
 
         let curatedContext;
 
-        const activeKeywords = [ ...this.#startingKeywords ];
+        const activeKeywords = this.#extractKeywords(this.#pinnedUserIntent);
 
         if (!fullMessages) {
+            const systemBoostTerms = this.#rerankActiveKeywords(10, activeKeywords, this.#pinnedUserIntent);
+
+            this.#addBoostTerms(systemBoostTerms);
+
             const restoredContext = await this.#contextStore.getLastSnapshot();
 
             if (!restoredContext.context || restoredContext.context?.length < 1 ) {
-                curatedContext = this.#buildContextSpace(null, null, activeKeywords);
+                curatedContext = this.#buildContextSpace(null, null, systemBoostTerms);
                 return curatedContext;
             }
 
@@ -617,11 +873,13 @@ export class ContextManager {
         while (anchorCount() > this.#maxVisibleAnchors || speakersCount() > this.#maxRecentTurns) {
             const newMsgChunk = fullMessages.shift();
 
-            const chunkKeywords = this.#extractKeywords(
-                `${newMsgChunk.content ? newMsgChunk.content : ''} ${newMsgChunk.thinking ? newMsgChunk.thinking : ''}`
-            );
+            const rawChunkContent = this.#extractRawContent([newMsgChunk]);
 
-            if (chunkKeywords.length > 0) this.#addBoostTerms(chunkKeywords);
+            const chunkKeywords = this.#extractKeywords(rawChunkContent);
+
+            const bestChunkWords = this.#rerankActiveKeywords(10, chunkKeywords, rawChunkContent);
+
+            if (chunkKeywords.length > 0) this.#addBoostTerms(bestChunkWords);
         }
 
         const visibleAnchorIds = fullMessages.filter(x => x.eventId.includes('ctx-')).map(i => Number(i.eventId.slice(4)));
@@ -649,17 +907,20 @@ export class ContextManager {
             }
         };
 
+        const tempContentOnly = this.#extractRawContent(fullMessages);
+
+        const tempEmbeddings = await this.#getContentEmbeddings(tempContentOnly);
+
         const tempKeyWords = [ ...new Set(activeKeywords) ];
 
         const tempRankedWords = this.#rerankActiveKeywords(
             Math.max(25, Math.round(tempKeyWords.length * 0.15)),
-            tempKeyWords,
-            `${this.#pinnedUserIntent} ${this.#prevUserQuery ? this.#prevUserQuery : ''}`
+            tempKeyWords, tempContentOnly
         );
 
-        const recalledAnchors = await this.#anchorStore.searchAnchors(this.#startingEmbed, tempRankedWords, {
+        const recalledAnchors = await this.#anchorStore.searchAnchors(tempEmbeddings, tempRankedWords, {
             limit : this.#maxMemoryAnchors,
-            maxSequenceId : Math.min(visibleAnchorIds)
+            maxSequenceId : Math.min(visibleAnchorIds),
         });
 
         if (recalledAnchors.length > 0) {
@@ -675,9 +936,19 @@ export class ContextManager {
             const allRecalledKeywords = [ ...new Set((recalledAnchors.map(m => m.keywords)).flat()) ];
             activeKeywords.push(...allRecalledKeywords);
 
-            curatedContext = this.#buildContextSpace(fullMessages, relevantMemories, activeKeywords);
+            const finalActiveKeywords = this.#rerankActiveKeywords(
+                10, activeKeywords,
+                this.#extractRawContent(fullMessages) 
+            );
+
+            curatedContext = this.#buildContextSpace(fullMessages, relevantMemories, finalActiveKeywords);
         } else {
-            curatedContext = this.#buildContextSpace(fullMessages, null, activeKeywords);
+            const finalActiveKeywords = this.#rerankActiveKeywords(
+                10, activeKeywords,
+                this.#extractRawContent(fullMessages) 
+            );
+
+            curatedContext = this.#buildContextSpace(fullMessages, null, finalActiveKeywords);
         }
 
         await this.#contextStore.newSnapshot(curatedContext, {
@@ -688,5 +959,82 @@ export class ContextManager {
         });
 
         return curatedContext;
+    }
+
+    async getContextUpdate(messages, isLast = false, finalResult = null) {
+        if (!messages) {
+            const contextRecovery = await this.#getContextMessages(null, false, isLast);
+            return contextRecovery;
+        }
+
+        const summaryContext = await this.#getContextMessages(messages, true, isLast);
+        const modelSummaryContext = JSON.stringify(stripEventIds(summaryContext));
+        const summaryContent = this.#extractRawContent(summaryContext);
+
+        const denseSummaryObject = await this.#getContextSummary('dense_summary', modelSummaryContext);
+        const denseSummary = JSON.stringify(denseSummaryObject);
+        const denseContent = Object.values(denseSummaryObject).reduce((acc, val) => `${acc} ${val}`, '');
+
+        const trajectorySummaryObject = await this.#getContextSummary('trajectory_summary', modelSummaryContext);
+        const trajectorySummary = JSON.stringify(trajectorySummaryObject);
+        const trajectoryContent = Object.values(trajectorySummaryObject).reduce((acc, val) => `${acc} ${val}`, '');
+
+        const allEmbeddings = await withRetry(async () => (await ollama.embed({ 
+            model : summaryDefinitions.embed_model.model, 
+            input : [summaryContent, denseContent, trajectoryContent],
+            options: summaryDefinitions.embed_model.options
+        })).embeddings);
+
+        const [ convEmbedding, denseEmbedding, trajEmbedding ] = allEmbeddings;
+
+        const fullAnchorData = this.#extractAnchorFeatures(
+            summaryContent,
+            { denseSummary : denseContent, trajectorySummary : trajectoryContent },
+            { convEmbedding, denseEmbedding, trajEmbedding },
+        );
+
+        const verificationJson = await this.#getVerificationSummary(modelSummaryContext, fullAnchorData, { denseSummary, trajectorySummary });
+
+        const verifierTrustScore = verificationJson?.trust_score ? verificationJson.trust_score : 0;
+        const consistency = verificationJson?.consistency_between_summaries ? verificationJson.consistency_between_summaries : 0;
+
+        const bestSummary = fullAnchorData.reliabilityDense >= fullAnchorData.reliabilityTraj ? denseSummaryObject : trajectorySummaryObject;
+
+        const { U, S, P, T } = bestSummary;
+
+        const anchorTrustScore = this.#calculateTrustScore(fullAnchorData, verifierTrustScore, consistency);
+
+        const { anchorId, anchorStatus, anchorTime, resolutionAnchor } = await this.#addAnchor(
+            anchorTrustScore, isLast, {
+                dense : {
+                    summary : denseSummaryObject,
+                    keywords : [ ...fullAnchorData.kwDense ],
+                    embeddings : denseEmbedding
+                },
+
+                trajectory : {
+                    summary : trajectorySummaryObject,
+                    keywords : [ ...fullAnchorData.kwTraj ],
+                    embeddings : trajEmbedding
+                }
+            }, {
+                turns : stripEventIds(summaryContext),
+                keywords : [ ...fullAnchorData.kwConv ],
+                embeddings : convEmbedding
+            },
+            finalResult
+        );
+
+        const compactTimeStamp = this.#compactTimestamp(anchorTime);
+
+        const finalInjection = `
+            [CTX_ANC_${anchorId}|STATUS:${anchorStatus}|RES_ANC:${!resolutionAnchor ? '-' : `A${resolutionAnchor}`}|SYS_TIME:${compactTimeStamp}]=[U:${U}][S:${S}][P:${P}][T:${T}]
+        `.trim();
+
+        if (anchorTrustScore >= 50) messages.push({role: 'system', eventId: `ctx-${anchorId}`, content:finalInjection});
+
+        const prunedMessages = await this.#getContextMessages(messages, false, isLast);
+
+        return prunedMessages;
     }
 }

@@ -16,6 +16,8 @@ export const summaryDefinitions = {
     embed_model: {
         model: 'qwen3-embedding',
 
+        dimensions : 4096,
+
         options : {
             num_ctx: 16384
         }
